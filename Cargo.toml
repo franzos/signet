@@ -1,0 +1,15 @@
+[workspace]
+resolver = "2"
+members = ["crates/signet-core", "crates/signet-issuer", "crates/signet-shop"]
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+license = "MIT"
+authors = ["Franz Geffke <mail@gofranz.com>"]
+repository = "https://github.com/franzos/signet"
+homepage = "https://github.com/franzos/signet"
+
+[profile.release]
+strip = true
+lto = "thin"

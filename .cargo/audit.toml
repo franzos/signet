@@ -1,0 +1,10 @@
+# cargo-audit configuration.
+#
+# RUSTSEC-2023-0071 (Marvin timing attack in `rsa`) reaches the lockfile only
+# through `sqlx-mysql`, which is NOT compiled: the shop uses sqlx with the
+# `sqlite` feature only (`cargo tree -i sqlx-mysql` finds nothing in the build
+# graph). No fixed `rsa` release exists, and the MySQL driver is never linked,
+# so this advisory is not exploitable here. Re-evaluate if a MySQL/Postgres
+# backend is ever enabled.
+[advisories]
+ignore = ["RUSTSEC-2023-0071"]

@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" fill="none">
+  <defs>
+    <linearGradient id="seal" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#60a5fa"/>
+      <stop offset="100%" stop-color="#7c3aed"/>
+    </linearGradient>
+    <linearGradient id="key" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#fbbf24"/>
+      <stop offset="100%" stop-color="#d97706"/>
+    </linearGradient>
+  </defs>
+
+  <!-- scalloped wax-seal rim: a dashed ring reads as the pressed edge -->
+  <circle cx="50" cy="50" r="40" fill="none" stroke="url(#seal)" stroke-width="4"
+          stroke-dasharray="4.5 4.2" stroke-linecap="round" opacity="0.85"/>
+
+  <!-- seal body -->
+  <circle cx="50" cy="50" r="32" fill="url(#seal)" opacity="0.9"/>
+  <circle cx="50" cy="50" r="32" fill="none" stroke="#0f172a" stroke-width="1.5" opacity="0.25"/>
+
+  <!-- stamped keyhole: the mark pressed into the seal -->
+  <circle cx="50" cy="42" r="8" fill="url(#key)"/>
+  <path d="M45 47 L42 66 L58 66 L55 47 Z" fill="url(#key)"/>
+</svg>

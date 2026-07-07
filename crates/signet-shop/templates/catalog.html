@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}{{ title }}{% endblock %}
+{% block content %}
+  <h1>{{ title }}</h1>
+  {% for group in groups %}
+    <section class="category">
+      <h2 class="category-name"><a href="/{{ group.id }}">{{ group.name }}</a></h2>
+      {% if let Some(desc) = group.description %}<p class="category-desc">{{ desc }}</p>{% endif %}
+      {% for sku in group.skus %}
+        <section class="sku">
+          <h3>{{ sku.display_name }}</h3>
+          {% if let Some(desc) = sku.description %}<p class="sku-desc">{{ desc }}</p>{% endif %}
+          <p class="price">{{ sku.price_label }}</p>
+          {% if let Some(url) = sku.url %}<p class="sku-link"><a href="{{ url }}" rel="noopener">Learn more</a></p>{% endif %}
+          <form method="post" action="/checkout">
+            <input type="hidden" name="sku" value="{{ sku.id }}">
+            <button type="submit">Buy</button>
+          </form>
+        </section>
+      {% endfor %}
+    </section>
+  {% endfor %}
+{% endblock %}

@@ -1,0 +1,18 @@
+[package]
+name = "signet-core"
+description = "Shared library for Signet: license claims, Ed25519 signing, and wire format."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+ciborium = "0.2"
+ed25519-dalek = { version = "2", features = ["pem", "pkcs8", "rand_core"] }
+hex = "0.4"
+rand = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_bytes = "0.11"

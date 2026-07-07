@@ -1,0 +1,12 @@
+.git/
+.gitignore
+.dockerignore
+target/
+keys/
+ledger/
+content/
+catalog.toml
+*.db
+*.db-wal
+*.db-shm
+*.md

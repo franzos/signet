@@ -1,0 +1,97 @@
+# Signet shop catalog (per-site). Copy to catalog.toml and edit; the real
+# catalog.toml is git-ignored. Point the binary at it with CATALOG_PATH
+# (default ./catalog.toml).
+#
+# Workflow: define your categories and SKUs here, then run
+# `signet-shop provision-stripe`. It creates the Stripe products/prices and
+# writes each `stripe_price_id` below back into this file (comments preserved).
+# Re-running is idempotent; changing an `amount_cents` supersedes the price and
+# rewrites its id on the next run.
+
+[shop]
+title = "Example Licenses"
+# payment_notice = "..."   # overrides the default footer notice; "" hides it
+
+# Markdown content pages live in content/<slug>.md (per-site, git-ignored, path
+# via CONTENT_DIR, default ./content) and are served at /p/<slug>. Set
+# footer = true to list them in the footer; the link only shows if the markdown
+# file exists. See content.example/ for starter Terms and Privacy pages.
+[[page]]
+slug = "terms"
+title = "Terms of Service"
+footer = true
+
+[[page]]
+slug = "privacy"
+title = "Privacy"
+footer = true
+
+# Arbitrary extra footer links (internal or external).
+[[footer_link]]
+title = "Contact"
+url = "mailto:sales@example.com"
+
+# Optional analytics snippet. Rendered into <head>; its origin is added to the
+# CSP automatically so the strict policy allows exactly this host. https only.
+# [analytics]
+# src = "https://stats.example.com/script.js"
+# entity = "example.com"     # -> data-entity
+# module = true              # -> type="module"
+
+# A category is a product line. Its `id` selects the signing key
+# (keys/<id>/private.bin) and is stamped into the license as the `product`
+# claim, so an Acme purchase only verifies against Acme's public key and a
+# Globex purchase only against Globex's, never each other's.
+[[category]]
+id = "acme"
+name = "Acme"
+description = "Self-hosted app for teams."
+url = "https://acme.example"                   # optional; shown as the heading link
+
+[[category]]
+id = "globex"
+name = "Globex"
+description = "Analytics for your stack."
+url = "https://globex.example"
+
+# One [[sku]] per purchasable plan. `category` must match a [[category]] id.
+[[sku]]
+id = "acme-business-annual"         # internal id, must be unique
+category = "acme"
+display_name = "Acme Business (annual)"
+description = "Up to 50 orgs, SSO, audit log."   # optional, shown on the card
+url = "https://acme.example/pricing"             # optional "Learn more" link
+price_label = "EUR 499 / year"      # shown on the buy page
+amount_cents = 49900                # used by provision-stripe to create the Price
+currency = "eur"
+stripe_price_id = ""                # written by `provision-stripe`
+tier = "business"                   # free-form marketing label on the license
+features = ["orgs", "saml", "audit_log"]
+max_orgs = 50                       # omit for unlimited
+max_seats = 200                     # omit for unlimited
+term = "365d"                       # "<days>d" or "lifetime"
+
+[[sku]]
+id = "acme-business-lifetime"
+category = "acme"
+display_name = "Acme Business (lifetime)"
+description = "Everything in Business, one-time purchase."
+price_label = "EUR 1499 once"
+amount_cents = 149900
+currency = "eur"
+stripe_price_id = ""
+tier = "business"
+features = ["orgs", "saml", "audit_log"]
+term = "lifetime"
+
+[[sku]]
+id = "globex-pro-annual"
+category = "globex"
+display_name = "Globex Pro (annual)"
+price_label = "EUR 299 / year"
+amount_cents = 29900
+currency = "eur"
+stripe_price_id = ""
+tier = "pro"
+features = ["metrics"]
+term = "365d"

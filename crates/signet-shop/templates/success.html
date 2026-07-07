@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}Your license{% endblock %}
+{% block content %}
+  {% if pending %}
+    <h1>Payment is still processing</h1>
+    <p>Your payment has not been confirmed yet. This can take a moment.</p>
+    <p><a class="button" href="/success?session_id={{ session_id }}">Refresh</a></p>
+  {% else %}
+    <h1>Thank you</h1>
+    <p>Your {{ product }} license is below. Paste it into your app's admin license page, or download it as a file.</p>
+    <textarea class="license" rows="6" readonly>{{ blob }}</textarea>
+    <p class="download"><a class="button"
+   href="/success/download?session_id={{ session_id }}"
+   download>Download license</a></p>
+  {% endif %}
+{% endblock %}

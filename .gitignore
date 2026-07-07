@@ -1,0 +1,8 @@
+/target
+/keys/*
+/ledger/*.jsonl
+/catalog.toml
+/content/
+*.db
+*.db-wal
+*.db-shm

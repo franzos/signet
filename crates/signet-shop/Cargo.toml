@@ -1,0 +1,40 @@
+[package]
+name = "signet-shop"
+description = "Signet's single-binary web shop: sell licenses via Stripe Checkout and issue them offline."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "signet-shop"
+path = "src/main.rs"
+
+[dependencies]
+signet-core = { path = "../signet-core" }
+anyhow = "1"
+axum = "0.8"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net"] }
+tower-http = { version = "0.6", features = ["set-header", "limit"] }
+tower_governor = { version = "0.8", default-features = false, features = ["axum"] }
+askama = "0.16"
+include_dir = "0.7"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros"] }
+ed25519-dalek = { version = "2" }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+toml_edit = "0.22"
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Stripe via async-stripe 1.0-rc (modular; hyper client + rustls). The webhook
+# crate replaces our hand-rolled HMAC signature verification.
+async-stripe = { version = "=1.0.0-rc.6", default-features = false, features = ["rustls-tls-webpki-roots", "rustls-ring"] }
+async-stripe-types = "=1.0.0-rc.6"
+async-stripe-shared = "=1.0.0-rc.6"
+async-stripe-checkout = { version = "=1.0.0-rc.6", features = ["checkout_session"] }
+async-stripe-product = { version = "=1.0.0-rc.6", features = ["product", "price"] }
+async-stripe-webhook = { version = "=1.0.0-rc.6", features = ["async-stripe-checkout"] }
