@@ -16,6 +16,11 @@ I wrote Signet to sell licenses for my own self-hosted apps, then realized the m
 
 There's no license server to run, no runtime dependency, no per-check network call. You keep a signing key offline, your app bakes in the matching public key, and verification is a local Ed25519 check. If you want to sell the licenses too, the shop is a single binary you point at Stripe.
 
+<p align="center">
+  <img src="docs/screenshots/01-storefront.png" alt="Storefront listing product lines and plans" width="48%">
+  <img src="docs/screenshots/02-category-dark.png" alt="Product-line page with per-plan buy buttons (dark theme)" width="48%">
+</p>
+
 ## What's in the box
 
 A Cargo workspace with three crates:
