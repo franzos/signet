@@ -14,6 +14,7 @@ pub struct AppState {
     pub stripe: stripe::Client,
     pub signing: Arc<HashMap<String, SigningKey>>,
     pub db: sqlx::SqlitePool,
+    pub neg_cache: Arc<crate::cache::NegCache>,
 }
 
 /// Load `keys/<category>/private.bin` for every category referenced by the

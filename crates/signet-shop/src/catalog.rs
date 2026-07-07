@@ -137,6 +137,24 @@ impl Catalog {
     pub fn category_ids(&self) -> BTreeSet<&str> {
         self.categories.iter().map(|c| c.id.as_str()).collect()
     }
+
+    /// Every purchasable SKU must have a Stripe price id. Called at serve time, not
+    /// parse time, so `provision-stripe` can still load an un-provisioned catalog.
+    pub fn ensure_provisioned(&self) -> anyhow::Result<()> {
+        let missing: Vec<&str> = self
+            .skus
+            .iter()
+            .filter(|s| s.stripe_price_id.is_empty())
+            .map(|s| s.id.as_str())
+            .collect();
+        if !missing.is_empty() {
+            anyhow::bail!(
+                "SKU(s) missing stripe_price_id: {} (run `signet-shop provision-stripe`)",
+                missing.join(", ")
+            );
+        }
+        Ok(())
+    }
 }
 
 /// `CATALOG_PATH`, or `./catalog.toml`.
@@ -578,6 +596,44 @@ tier = "t"
 term = "lifetime"
 "#;
         assert!(parse(bad).is_err());
+    }
+
+    #[test]
+    fn ensure_provisioned_requires_price_ids() {
+        let unprovisioned = r#"
+[[category]]
+id = "p"
+name = "P"
+
+[[sku]]
+id = "x"
+category = "p"
+display_name = "X"
+amount_cents = 100
+currency = "eur"
+tier = "t"
+term = "lifetime"
+"#;
+        let cat = parse(unprovisioned).unwrap();
+        assert!(cat.ensure_provisioned().is_err());
+
+        let provisioned = r#"
+[[category]]
+id = "p"
+name = "P"
+
+[[sku]]
+id = "x"
+stripe_price_id = "price_x"
+category = "p"
+display_name = "X"
+amount_cents = 100
+currency = "eur"
+tier = "t"
+term = "lifetime"
+"#;
+        let cat = parse(provisioned).unwrap();
+        assert!(cat.ensure_provisioned().is_ok());
     }
 
     #[test]

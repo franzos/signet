@@ -31,7 +31,10 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Stripe via async-stripe 1.0-rc (modular; hyper client + rustls). The webhook
-# crate replaces our hand-rolled HMAC signature verification.
+# crate replaces our hand-rolled HMAC signature verification, so signature
+# verification rides on this crate. Accepted risk: deliberately pinned to a
+# pre-release (no stable 1.0 exists yet); move to 1.0 stable once released.
+# Keep the exact `=` pins until then.
 async-stripe = { version = "=1.0.0-rc.6", default-features = false, features = ["rustls-tls-webpki-roots", "rustls-ring"] }
 async-stripe-types = "=1.0.0-rc.6"
 async-stripe-shared = "=1.0.0-rc.6"

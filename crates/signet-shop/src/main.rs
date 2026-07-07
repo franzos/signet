@@ -1,3 +1,4 @@
+mod cache;
 mod catalog;
 mod config;
 mod content;
@@ -47,17 +48,23 @@ fn print_help() {
 async fn serve() -> Result<()> {
     let cfg = config::AppConfig::from_env()?;
     let catalog = std::sync::Arc::new(catalog::load(&catalog::default_path())?);
+    catalog.ensure_provisioned()?;
     let signing = state::load_signing_keys(&cfg, &catalog)?;
     let db = db::connect(&cfg.database_url).await?;
     let stripe = stripe::ClientBuilder::new(cfg.stripe_api_key.clone())
         .build()
         .context("build stripe client")?;
+    let neg_cache = std::sync::Arc::new(cache::NegCache::new(
+        std::time::Duration::from_secs(30),
+        50_000,
+    ));
     let state = state::AppState {
         cfg: std::sync::Arc::new(cfg.clone()),
         catalog,
         stripe,
         signing: std::sync::Arc::new(signing),
         db,
+        neg_cache,
     };
 
     let app = routes::router(state);

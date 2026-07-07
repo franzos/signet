@@ -13,21 +13,41 @@ use crate::{catalog, fulfill, payments};
 pub fn router(state: AppState) -> Router {
     use axum::extract::DefaultBodyLimit;
     use std::sync::Arc;
-    use tower_governor::{governor::GovernorConfigBuilder, GovernorLayer};
+    use tower_governor::governor::GovernorConfigBuilder;
+    use tower_governor::key_extractor::SmartIpKeyExtractor;
+    use tower_governor::GovernorLayer;
     use tower_http::set_header::SetResponseHeaderLayer;
 
-    // Per-IP limiter on the two endpoints that reach Stripe (denial-of-wallet).
-    // The default PeerIpKeyExtractor keys on the direct peer, which requires
-    // `into_make_service_with_connect_info::<SocketAddr>()` in main.rs. BEHIND A
-    // PROXY/LB the peer is the proxy, so per-IP becomes global: switch to
-    // `SmartIpKeyExtractor` and document the topology. Direct exposure keeps PeerIp.
-    let governor = Arc::new(
-        GovernorConfigBuilder::default()
-            .per_second(2)
-            .burst_size(5)
-            .finish()
-            .expect("valid governor config"),
-    );
+    // Per-IP limiter on the endpoints that reach Stripe (denial-of-wallet). The
+    // key extractor is selected by TRUST_PROXY: the default PeerIpKeyExtractor
+    // keys on the direct peer (requires `into_make_service_with_connect_info`),
+    // which behind a proxy/LB collapses to one global bucket. Set TRUST_PROXY for
+    // trusted-proxy deployments to use SmartIpKeyExtractor (X-Forwarded-For);
+    // never enable it when directly exposed, as that header is then spoofable.
+    let peer_cfg = GovernorConfigBuilder::default()
+        .per_second(2)
+        .burst_size(5)
+        .finish()
+        .expect("valid governor config");
+    let smart_cfg = GovernorConfigBuilder::default()
+        .per_second(2)
+        .burst_size(5)
+        .key_extractor(SmartIpKeyExtractor)
+        .finish()
+        .expect("valid governor config");
+    // Routes defined once; the two branches only differ in the layer's key
+    // extractor type, and `.layer()` erases the service so both are Router<AppState>.
+    let limited_base = || {
+        Router::new()
+            .route("/checkout", post(checkout))
+            .route("/success", get(success))
+            .route("/success/download", get(success_download))
+    };
+    let limited = if state.cfg.trust_proxy {
+        limited_base().layer(GovernorLayer::new(Arc::new(smart_cfg)))
+    } else {
+        limited_base().layer(GovernorLayer::new(Arc::new(peer_cfg)))
+    };
 
     // Self-hosted static UI plus a redirect out to Stripe. The Buy form POSTs to
     // /checkout, which 303-redirects to checkout.stripe.com; browsers apply
@@ -53,22 +73,11 @@ pub fn router(state: AppState) -> Router {
         .route("/p/{slug}", get(page_view))
         .route("/{category}", get(category_page))
         .route(
-            "/checkout",
-            post(checkout).layer(GovernorLayer::new(governor.clone())),
-        )
-        .route(
-            "/success",
-            get(success).layer(GovernorLayer::new(governor.clone())),
-        )
-        .route(
-            "/success/download",
-            get(success_download).layer(GovernorLayer::new(governor.clone())),
-        )
-        .route(
             "/webhook",
             post(webhook).layer(DefaultBodyLimit::max(64 * 1024)),
         )
         .route("/static/{*path}", get(crate::static_assets::serve))
+        .merge(limited)
         .layer(SetResponseHeaderLayer::overriding(
             header::X_CONTENT_TYPE_OPTIONS,
             HeaderValue::from_static("nosniff"),

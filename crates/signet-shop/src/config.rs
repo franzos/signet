@@ -1,8 +1,9 @@
+use std::fmt;
 use std::path::PathBuf;
 
 use anyhow::{anyhow, Result};
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AppConfig {
     pub stripe_api_key: String,
     pub stripe_webhook_secret: String,
@@ -11,6 +12,22 @@ pub struct AppConfig {
     pub content_dir: PathBuf,
     pub base_url: String,
     pub bind_addr: String,
+    pub trust_proxy: bool,
+}
+
+impl fmt::Debug for AppConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AppConfig")
+            .field("stripe_api_key", &"[redacted]")
+            .field("stripe_webhook_secret", &"[redacted]")
+            .field("database_url", &self.database_url)
+            .field("keys_dir", &self.keys_dir)
+            .field("content_dir", &self.content_dir)
+            .field("base_url", &self.base_url)
+            .field("bind_addr", &self.bind_addr)
+            .field("trust_proxy", &self.trust_proxy)
+            .finish()
+    }
 }
 
 impl AppConfig {
@@ -31,6 +48,9 @@ impl AppConfig {
                 .unwrap_or_else(|| "./content".into())
                 .into(),
             bind_addr: get("BIND_ADDR").unwrap_or_else(|| "127.0.0.1:8080".into()),
+            trust_proxy: get("TRUST_PROXY")
+                .map(|v| matches!(v.as_str(), "1" | "true" | "yes"))
+                .unwrap_or(false),
         })
     }
 }

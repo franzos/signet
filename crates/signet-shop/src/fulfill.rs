@@ -12,12 +12,28 @@ pub enum FulfillOutcome {
 }
 
 pub async fn fulfill(state: &AppState, session_id: &str) -> Result<FulfillOutcome> {
-    // Fast path: already fulfilled, no need to hit Stripe.
+    // Fast path: already fulfilled, no need to hit Stripe. Stays FIRST so a
+    // webhook-completed fulfillment always wins over a stale neg-cache entry.
     if let Some(existing) = db::get_by_session(&state.db, session_id).await? {
         return Ok(FulfillOutcome::Ready(existing));
     }
-    let info = payments::retrieve_session(&state.stripe, session_id).await?;
-    fulfill_paid_session(state, &info).await
+    // Recently checked and still not fulfillable: skip the Stripe round-trip.
+    if state.neg_cache.contains(session_id) {
+        return Ok(FulfillOutcome::Pending);
+    }
+    let info = match payments::retrieve_session(&state.stripe, session_id).await {
+        Ok(info) => info,
+        Err(e) => {
+            // Unknown/expired id: cache it so a flood of the same id costs one call.
+            state.neg_cache.insert(session_id.to_string());
+            return Err(e);
+        }
+    };
+    let outcome = fulfill_paid_session(state, &info).await?;
+    if matches!(outcome, FulfillOutcome::Pending) {
+        state.neg_cache.insert(session_id.to_string());
+    }
+    Ok(outcome)
 }
 
 pub async fn fulfill_paid_session(
@@ -128,6 +144,7 @@ term = "365d"
             content_dir: "content".into(),
             base_url: "http://x".into(),
             bind_addr: "127.0.0.1:0".into(),
+            trust_proxy: false,
         };
         // Distinct per-product signing keys, so a product mix-up is detectable.
         let mut signing = std::collections::HashMap::new();
@@ -145,6 +162,10 @@ term = "365d"
             stripe: stripe::ClientBuilder::new("sk_test_dummy").build().unwrap(),
             signing: std::sync::Arc::new(signing),
             db: crate::db::connect("sqlite::memory:").await.unwrap(),
+            neg_cache: std::sync::Arc::new(crate::cache::NegCache::new(
+                std::time::Duration::from_secs(30),
+                50_000,
+            )),
         }
     }
 
