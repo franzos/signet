@@ -1,10 +1,10 @@
 [workspace]
 resolver = "2"
-members = ["crates/signet-core", "crates/signet-issuer", "crates/signet-shop"]
+members = ["crates/signetlib", "crates/signet-issuer", "crates/signet-shop"]
 
 [workspace.package]
 edition = "2021"
-version = "0.1.0"
+version = "0.1.1"
 license = "MIT"
 authors = ["Franz Geffke <mail@gofranz.com>"]
 repository = "https://github.com/franzos/signet"

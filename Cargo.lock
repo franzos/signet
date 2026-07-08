@@ -2071,22 +2071,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "signet-core"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "base64",
- "ciborium",
- "ed25519-dalek",
- "hex",
- "rand 0.8.6",
- "serde",
- "serde_bytes",
-]
-
-[[package]]
 name = "signet-issuer"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2095,12 +2081,12 @@ dependencies = [
  "rand 0.8.6",
  "serde",
  "serde_json",
- "signet-core",
+ "signetlib",
 ]
 
 [[package]]
 name = "signet-shop"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "askama",
@@ -2116,7 +2102,7 @@ dependencies = [
  "include_dir",
  "pulldown-cmark",
  "serde",
- "signet-core",
+ "signetlib",
  "sqlx",
  "tokio",
  "toml",
@@ -2125,6 +2111,20 @@ dependencies = [
  "tower_governor",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "signetlib"
+version = "0.1.1"
+dependencies = [
+ "anyhow",
+ "base64",
+ "ciborium",
+ "ed25519-dalek",
+ "hex",
+ "rand 0.8.6",
+ "serde",
+ "serde_bytes",
 ]
 
 [[package]]

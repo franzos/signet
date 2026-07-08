@@ -18,8 +18,8 @@ use rand::rngs::OsRng;
 use rand::RngCore;
 use serde::Serialize;
 
-use signet_core::claims::Claims;
-use signet_core::codec;
+use signetlib::claims::Claims;
+use signetlib::codec;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -209,8 +209,8 @@ fn cmd_issue(
         }
     };
 
-    let issued = signet_core::issue(
-        signet_core::IssueParams {
+    let issued = signetlib::issue(
+        signetlib::IssueParams {
             product: product.clone(),
             customer: customer.clone(),
             email: email.clone(),

@@ -27,11 +27,11 @@ A Cargo workspace with three crates:
 
 | Crate | What it is |
 | --- | --- |
-| `signet-core` | The shared library: license claims, Ed25519 signing, and the wire format. Depend on it (or copy `verify.rs`) to check licenses in your own app. |
+| `signetlib` | The shared library: license claims, Ed25519 signing, and the wire format. Depend on it (or copy `verify.rs`) to check licenses in your own app. |
 | `signet-issuer` | An offline CLI: generate per-product keypairs, issue license blobs, verify/inspect them. Runs on an air-gapped box if you like. |
 | `signet-shop` | A single-binary web shop: a storefront, Stripe Checkout, and idempotent license fulfillment, all configured from files. |
 
-Two words for one thing: `signet-core` and the CLI call a product line a **product**; the shop's catalog calls it a **category**. A category id selects the signing key and is stamped into the license as its `product` claim. So a purchase in one product line only ever verifies against that line's public key, never another's.
+Two words for one thing: `signetlib` and the CLI call a product line a **product**; the shop's catalog calls it a **category**. A category id selects the signing key and is stamped into the license as its `product` claim. So a purchase in one product line only ever verifies against that line's public key, never another's.
 
 ## signet-issuer (CLI)
 
@@ -68,7 +68,7 @@ Back up `keys/` offline. Rotating a product's key invalidates every license alre
 
 ## signet-shop (web app)
 
-A single binary that serves a storefront, sends buyers to Stripe Checkout, and issues plus tracks licenses. It reuses `signet-core` for signing, so a license bought from the shop is byte-for-byte the same shape as a CLI-issued one.
+A single binary that serves a storefront, sends buyers to Stripe Checkout, and issues plus tracks licenses. It reuses `signetlib` for signing, so a license bought from the shop is byte-for-byte the same shape as a CLI-issued one.
 
 ### Configuration
 
@@ -113,9 +113,9 @@ A prebuilt image is published to the GitHub Container Registry on every tag:
 
 ## Verifying a license in your app
 
-Your app needs the public key and a signature check. `signet-core`'s `codec::decode_and_verify` does it in one call; the claims are a plain struct you match on. The gist:
+Your app needs the public key and a signature check. Add the library with `cargo add signetlib`; its `codec::decode_and_verify` does it in one call, and the claims are a plain struct you match on. The gist:
 
-    let claims = signet_core::codec::decode_and_verify(&blob, &public_key)?;
+    let claims = signetlib::codec::decode_and_verify(&blob, &public_key)?;
     if claims.expired(now) { /* grace / lock */ }
     for feature in &claims.features { /* unlock */ }
 

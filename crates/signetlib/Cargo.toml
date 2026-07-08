@@ -1,6 +1,6 @@
 [package]
-name = "signet-core"
-description = "Shared library for Signet: license claims, Ed25519 signing, and wire format."
+name = "signetlib"
+description = "Signet's library: license claims, Ed25519 signing, and the offline-verifiable wire format."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

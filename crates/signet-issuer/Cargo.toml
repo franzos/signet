@@ -1,6 +1,7 @@
 [package]
 name = "signet-issuer"
 description = "Signet's offline CLI: generate signing keys and issue/verify license blobs."
+publish = false
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -12,7 +13,7 @@ name = "signet-issuer"
 path = "src/main.rs"
 
 [dependencies]
-signet-core = { path = "../signet-core" }
+signetlib = { path = "../signetlib" }
 anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 clap = { version = "4", features = ["derive"] }

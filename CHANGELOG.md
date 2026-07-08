@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.1] - 2026-07-08
+
+### Changed
+- Renamed the library crate `signet-core` to `signetlib`; imports become `signetlib::`
+
+### Added
+- `signetlib` published to crates.io on tagged releases (`cargo add signetlib`)
+
 ## [0.1.0] - 2026-07-07
 
 ### Added

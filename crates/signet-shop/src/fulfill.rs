@@ -78,7 +78,7 @@ pub async fn fulfill_paid_session(
         now,
         format!("web:{}", session.id),
     );
-    let issued = signet_core::issue(params, now, signing)?;
+    let issued = signetlib::issue(params, now, signing)?;
 
     let rec = StoredLicense {
         stripe_session_id: session.id.clone(),
@@ -219,7 +219,7 @@ term = "365d"
     /// that product's key and does NOT verify against the other product's key.
     #[tokio::test]
     async fn licenses_are_signed_per_product_and_do_not_cross_verify() {
-        use signet_core::codec::decode_and_verify;
+        use signetlib::codec::decode_and_verify;
 
         let state = test_state().await;
         let acme_key = state.signing.get("acme").unwrap().verifying_key();

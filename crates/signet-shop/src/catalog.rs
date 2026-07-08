@@ -53,12 +53,12 @@ impl Sku {
         email: String,
         now_unix: i64,
         note: String,
-    ) -> signet_core::IssueParams {
+    ) -> signetlib::IssueParams {
         let expires_at = match self.term {
             Term::Lifetime => None,
             Term::Days(d) => Some(now_unix + d * 86_400),
         };
-        signet_core::IssueParams {
+        signetlib::IssueParams {
             product: self.category.clone(),
             customer,
             email,
