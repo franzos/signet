@@ -3,6 +3,7 @@ use chrono::Utc;
 
 use crate::catalog::Sku;
 use crate::db::{self, StoredLicense};
+use crate::mail::PurchaseNotice;
 use crate::payments::{self, SessionInfo};
 use crate::state::AppState;
 
@@ -79,6 +80,7 @@ pub async fn fulfill_paid_session(
         format!("web:{}", session.id),
     );
     let issued = signetlib::issue(params, now, signing)?;
+    let expires_at = issued.claims.expires_at;
 
     let rec = StoredLicense {
         stripe_session_id: session.id.clone(),
@@ -90,8 +92,35 @@ pub async fn fulfill_paid_session(
         blob: issued.blob,
         issued_at: now,
     };
-    let stored = db::insert_or_get(&state.db, &rec).await?;
+    let (stored, inserted) = db::insert_or_get(&state.db, &rec).await?;
+    // Send the purchase emails once, off the request path, only for the fresh
+    // insert. A mail failure is logged, never surfaced: it must not make the
+    // webhook 500 (which would have Stripe retry) nor block the /success page.
+    if inserted {
+        if let Some(mail) = state.mail.clone() {
+            let notice = PurchaseNotice {
+                buyer_email: stored.email.clone(),
+                customer: stored.customer.clone(),
+                product_display: sku.display_name.clone(),
+                license_id: stored.license_id.clone(),
+                license_blob: stored.blob.clone(),
+                expires_at,
+                price_label: price_label(sku),
+            };
+            tokio::spawn(async move { mail.notify_purchase(&notice).await });
+        }
+    }
     Ok(FulfillOutcome::Ready(stored))
+}
+
+/// A human price for the operator notice: the catalog label when set, otherwise
+/// derived from the SKU's amount and currency.
+fn price_label(sku: &Sku) -> String {
+    if sku.price_label.is_empty() {
+        format!("{} {:.2}", sku.currency, sku.amount_cents as f64 / 100.0)
+    } else {
+        sku.price_label.clone()
+    }
 }
 
 #[cfg(test)]
@@ -136,6 +165,7 @@ term = "365d"
     }
 
     async fn test_state() -> AppState {
+        crate::ensure_crypto_provider();
         let cfg = crate::config::AppConfig {
             stripe_api_key: "sk_test_dummy".into(),
             stripe_webhook_secret: "wh".into(),
@@ -166,6 +196,7 @@ term = "365d"
                 std::time::Duration::from_secs(30),
                 50_000,
             )),
+            mail: None,
         }
     }
 

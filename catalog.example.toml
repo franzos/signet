@@ -12,6 +12,29 @@
 title = "Example Licenses"
 # payment_notice = "..."   # overrides the default footer notice; "" hides it
 
+# Email on purchase (optional). When configured, the buyer is emailed their
+# license and the operator gets a sale notice. Leave secrets (token/pass) blank
+# here and inject them via env: every field is overridable by SIGNET_EMAIL__<FIELD>
+# (e.g. SIGNET_EMAIL__TOKEN, SIGNET_EMAIL__PASS), and env always wins. Omit this
+# whole section (and set no SIGNET_EMAIL__PROVIDER) to disable email entirely.
+# [email]
+# enabled = true                      # set false to load-but-skip
+# from_address = "no-reply@example.com"
+# from_name = "Example Licenses"      # optional display name
+# operator_address = "sales@example.com"   # gets the "license sold" notice; omit to skip
+# operator_name = "Sales"             # optional
+# --- pick ONE provider ---
+# Lettermint (HTTP API):
+# provider = "lettermint"
+# token = ""                          # set via SIGNET_EMAIL__TOKEN
+# SMTP (self-hosted):
+# provider = "smtp"
+# host = "smtp.example.com"
+# port = 587                          # optional; defaults per tls (465 implicit, 587 start_tls)
+# tls = "start_tls"                   # none | start_tls | implicit (default implicit)
+# user = "apikey"                     # optional
+# pass = ""                           # set via SIGNET_EMAIL__PASS
+
 # Markdown content pages live in content/<slug>.md (per-site, git-ignored, path
 # via CONTENT_DIR, default ./content) and are served at /p/<slug>. Set
 # footer = true to list them in the footer; the link only shows if the markdown

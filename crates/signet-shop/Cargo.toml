@@ -31,6 +31,14 @@ chrono = { version = "0.4", default-features = false, features = ["std", "clock"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# Email on purchase: polymail's `config` schema (ProviderConfig), with SMTP
+# (self-hosted) and Lettermint (HTTP) compiled in, both rustls.
+polymail = { version = "0.1.6", default-features = false, features = ["config", "smtp", "lettermint-reqwest-013"] }
+# Lettermint's reqwest links aws-lc-rs while async-stripe links ring, so rustls
+# sees two crypto providers and can't auto-pick. We install ring as the process
+# default at startup to resolve it; this direct dep exposes that provider.
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+
 # Stripe via async-stripe 1.0-rc (modular; hyper client + rustls). The webhook
 # crate replaces our hand-rolled HMAC signature verification, so signature
 # verification rides on this crate. Accepted risk: deliberately pinned to a

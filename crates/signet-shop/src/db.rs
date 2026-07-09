@@ -39,10 +39,17 @@ pub async fn connect(database_url: &str) -> Result<SqlitePool> {
     Ok(pool)
 }
 
-pub async fn insert_or_get(pool: &SqlitePool, rec: &StoredLicense) -> Result<StoredLicense> {
+/// Insert a license, or return the existing row for this session. The boolean is
+/// `true` only when this call actually inserted (the row was new), so the caller
+/// can fire side effects like the purchase email exactly once even though both
+/// the webhook and `/success` reach here for the same session.
+pub async fn insert_or_get(
+    pool: &SqlitePool,
+    rec: &StoredLicense,
+) -> Result<(StoredLicense, bool)> {
     // Insert only if this session id is new; the UNIQUE constraint makes the
     // race safe. Then read back whichever row won.
-    sqlx::query(
+    let inserted = sqlx::query(
         "INSERT INTO licenses
            (stripe_session_id, license_id, product, sku, customer, email, blob, issued_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -57,11 +64,14 @@ pub async fn insert_or_get(pool: &SqlitePool, rec: &StoredLicense) -> Result<Sto
     .bind(&rec.blob)
     .bind(rec.issued_at)
     .execute(pool)
-    .await?;
+    .await?
+    .rows_affected()
+        == 1;
 
-    get_by_session(pool, &rec.stripe_session_id)
+    let stored = get_by_session(pool, &rec.stripe_session_id)
         .await?
-        .ok_or_else(|| anyhow::anyhow!("row vanished after insert"))
+        .ok_or_else(|| anyhow::anyhow!("row vanished after insert"))?;
+    Ok((stored, inserted))
 }
 
 pub async fn get_by_session(pool: &SqlitePool, session_id: &str) -> Result<Option<StoredLicense>> {
@@ -95,12 +105,15 @@ mod tests {
     #[tokio::test]
     async fn insert_or_get_is_idempotent_on_session_id() {
         let pool = connect("sqlite::memory:").await.unwrap();
-        let first = insert_or_get(&pool, &rec("cs_1", "lic_a")).await.unwrap();
+        let (first, inserted) = insert_or_get(&pool, &rec("cs_1", "lic_a")).await.unwrap();
         assert_eq!(first.license_id, "lic_a");
+        assert!(inserted, "first insert is fresh");
         // Second trigger for the SAME session with a DIFFERENT freshly-minted
-        // license must return the already-stored one, never the newcomer.
-        let second = insert_or_get(&pool, &rec("cs_1", "lic_b")).await.unwrap();
+        // license must return the already-stored one, never the newcomer, and
+        // report that nothing new was inserted.
+        let (second, inserted) = insert_or_get(&pool, &rec("cs_1", "lic_b")).await.unwrap();
         assert_eq!(second.license_id, "lic_a");
         assert_eq!(second.blob, "blob-for-lic_a");
+        assert!(!inserted, "second call must not insert");
     }
 }

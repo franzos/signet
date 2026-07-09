@@ -80,6 +80,8 @@ Everything site-specific lives in files, not the binary, so one build runs any s
 
 Environment for `serve`: `STRIPE_API_KEY`, `STRIPE_WEBHOOK_SECRET`, `DATABASE_URL` (SQLite), `BASE_URL`, and optional `KEYS_DIR`, `CONTENT_DIR`, `CATALOG_PATH`, `BIND_ADDR` (default `127.0.0.1:8080`).
 
+Email on purchase (optional, off by default): configure a provider to email the buyer their license and notify the operator of each sale. Settings live in an `[email]` table in `catalog.toml` (built on [polymail](https://github.com/franzos/polymail-rs)'s `ProviderConfig`); every field is overridable by `SIGNET_EMAIL__<FIELD>` env vars, and env always wins, so keep secrets blank in the file and inject them at runtime. Set `from_address` (and optional `from_name`), `operator_address` (optional `operator_name`) for the sale notice, and one `provider`: `lettermint` with `token`, or `smtp` with `host`/`port`/`tls` (`none`|`start_tls`|`implicit`)/`user`/`pass`. Both providers are compiled in; pick one per instance. Omit the section (and set no `SIGNET_EMAIL__PROVIDER`) or set `enabled = false` to disable. See `catalog.example.toml` for the full shape.
+
 ### Provisioning Stripe
 
 Define categories and SKUs in `catalog.toml`, then:
@@ -92,7 +94,7 @@ It creates (or reuses) a Stripe Product + Price per SKU and writes each resolved
 
     signet-shop serve
 
-The buy flow: a Buy button POSTs to `/checkout`, which redirects to Stripe's hosted Checkout. Stripe collects the buyer's email and a required "Company name" custom field, both embedded in the issued license. After payment the buyer lands on `/success`, which queries Stripe directly and mints the license, so it works even without a webhook; a `/success/download` link serves the license as a file. The `/webhook` endpoint (verified with `STRIPE_WEBHOOK_SECRET`) is the fallback that fulfills when the buyer never returns, or for delayed payment methods. Fulfillment is idempotent, keyed on the Stripe session id, so a license mints exactly once. Issued licenses are recorded in SQLite for tracking and reissue.
+The buy flow: a Buy button POSTs to `/checkout`, which redirects to Stripe's hosted Checkout. Stripe collects the buyer's email and a required "Company name" custom field, both embedded in the issued license. After payment the buyer lands on `/success`, which queries Stripe directly and mints the license, so it works even without a webhook; a `/success/download` link serves the license as a file. The `/webhook` endpoint (verified with `STRIPE_WEBHOOK_SECRET`) is the fallback that fulfills when the buyer never returns, or for delayed payment methods. Fulfillment is idempotent, keyed on the Stripe session id, so a license mints exactly once. Issued licenses are recorded in SQLite for tracking and reissue. When email is configured, the buyer is emailed their license (with expiry) and the operator gets a sale notice, sent once on the fresh mint and off the request path; a mail failure is logged and never blocks or reverses license delivery.
 
 The UI is self-hosted (strict CSP), with a system/light/dark theme toggle and a configurable footer (content pages, links, and a payment-data notice). A configured `[analytics]` host is added to the CSP automatically.
 

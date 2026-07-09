@@ -196,6 +196,7 @@ mod itests {
         let key = std::env::var("STRIPE_SECRET_KEY")
             .ok()
             .or_else(|| std::env::var("STRIPE_API_KEY").ok())?;
+        crate::ensure_crypto_provider();
         stripe::ClientBuilder::new(key).build().ok()
     }
 

@@ -4,6 +4,7 @@ mod config;
 mod content;
 mod db;
 mod fulfill;
+mod mail;
 mod payments;
 mod provision;
 mod render;
@@ -13,8 +14,17 @@ mod static_assets;
 
 use anyhow::{Context, Result};
 
+/// Install ring as the process-wide rustls provider. Two providers are linked
+/// (async-stripe: ring, Lettermint's reqwest: aws-lc-rs), so rustls cannot pick
+/// one from features and must be told explicitly, once, before any TLS is set
+/// up. Idempotent: a second call is a no-op.
+pub(crate) fn ensure_crypto_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    ensure_crypto_provider();
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
@@ -58,6 +68,21 @@ async fn serve() -> Result<()> {
         std::time::Duration::from_secs(30),
         50_000,
     ));
+    let mail = match mail::EmailConfig::load(&catalog::default_path(), &|k| std::env::var(k).ok())?
+    {
+        Some(ec) if ec.enabled => {
+            let svc = mail::MailService::from_config(ec).context("build mail service")?;
+            Some(std::sync::Arc::new(svc))
+        }
+        Some(_) => {
+            tracing::info!("email is configured but disabled (enabled = false)");
+            None
+        }
+        None => {
+            tracing::warn!("no email provider configured; purchase emails are disabled");
+            None
+        }
+    };
     let state = state::AppState {
         cfg: std::sync::Arc::new(cfg.clone()),
         catalog,
@@ -65,6 +90,7 @@ async fn serve() -> Result<()> {
         signing: std::sync::Arc::new(signing),
         db,
         neg_cache,
+        mail,
     };
 
     let app = routes::router(state);

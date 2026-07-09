@@ -6,6 +6,11 @@
 # rust image) and to Stripe over rustls, so there's no libpq or OpenSSL here.
 FROM rust:1-slim-trixie AS builder
 WORKDIR /app
+# cmake + a C toolchain build aws-lc-sys, pulled in by the Lettermint mail
+# transport's reqwest/rustls. gcc ships in the rust image; cmake does not.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends cmake \
+    && rm -rf /var/lib/apt/lists/*
 COPY . .
 # BuildKit cache mounts keep the cargo registry and target dir warm across
 # builds; the binary is copied out of the cached target in the same layer.

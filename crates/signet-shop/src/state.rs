@@ -6,6 +6,7 @@ use ed25519_dalek::SigningKey;
 
 use crate::catalog::Catalog;
 use crate::config::AppConfig;
+use crate::mail::MailService;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -15,6 +16,8 @@ pub struct AppState {
     pub signing: Arc<HashMap<String, SigningKey>>,
     pub db: sqlx::SqlitePool,
     pub neg_cache: Arc<crate::cache::NegCache>,
+    /// Purchase-email sender; `None` when no mail provider is configured.
+    pub mail: Option<Arc<MailService>>,
 }
 
 /// Load `keys/<category>/private.bin` for every category referenced by the
