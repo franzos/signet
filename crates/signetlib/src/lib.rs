@@ -5,4 +5,5 @@ pub mod claims;
 pub mod codec;
 mod issue;
 
+pub use codec::Error;
 pub use issue::{issue, IssueParams, Issued};

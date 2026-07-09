@@ -92,12 +92,18 @@ pub async fn create_checkout_session(
     Ok(SessionInfo::from_session(&session))
 }
 
-pub async fn retrieve_session(client: &stripe::Client, session_id: &str) -> Result<SessionInfo> {
-    let session = RetrieveCheckoutSession::new(session_id)
-        .send(client)
-        .await
-        .context("retrieve checkout session")?;
-    Ok(SessionInfo::from_session(&session))
+/// Retrieve a Checkout Session by id. `Ok(None)` when Stripe has no such
+/// session (unknown or long-expired id); any other API error propagates so
+/// the caller can treat it as transient.
+pub async fn retrieve_session(
+    client: &stripe::Client,
+    session_id: &str,
+) -> Result<Option<SessionInfo>> {
+    match RetrieveCheckoutSession::new(session_id).send(client).await {
+        Ok(s) => Ok(Some(SessionInfo::from_session(&s))),
+        Err(stripe::StripeError::Stripe(_, 404)) => Ok(None),
+        Err(e) => Err(e).context("retrieve checkout session"),
+    }
 }
 
 /// Ensure a Stripe Product exists for `sku_id`, keyed on `metadata[sku]`.
@@ -249,7 +255,8 @@ mod itests {
 
         let fetched = retrieve_session(&client, &info.id)
             .await
-            .expect("retrieve session");
+            .expect("retrieve session")
+            .expect("session should exist");
         assert!(!fetched.paid, "a fresh session is not paid");
         assert_eq!(
             fetched.sku.as_deref(),

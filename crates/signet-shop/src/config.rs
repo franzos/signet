@@ -42,7 +42,7 @@ impl AppConfig {
             stripe_api_key: req("STRIPE_API_KEY")?,
             stripe_webhook_secret: req("STRIPE_WEBHOOK_SECRET")?,
             database_url: req("DATABASE_URL")?,
-            base_url: req("BASE_URL")?,
+            base_url: validate_base_url(req("BASE_URL")?)?,
             keys_dir: get("KEYS_DIR").unwrap_or_else(|| "./keys".into()).into(),
             content_dir: get("CONTENT_DIR")
                 .unwrap_or_else(|| "./content".into())
@@ -53,6 +53,23 @@ impl AppConfig {
                 .unwrap_or(false),
         })
     }
+}
+
+/// BASE_URL ends up in Stripe success/cancel URLs; a plain-http value would
+/// send the session id bearer secret over the wire in clear.
+fn validate_base_url(url: String) -> Result<String> {
+    if url.starts_with("https://") {
+        return Ok(url);
+    }
+    if let Some(rest) = url.strip_prefix("http://") {
+        let host = rest.split(['/', ':']).next().unwrap_or("");
+        if host == "localhost" || host == "127.0.0.1" {
+            return Ok(url);
+        }
+    }
+    Err(anyhow!(
+        "BASE_URL must be https:// (http:// is allowed only for localhost/127.0.0.1): {url}"
+    ))
 }
 
 #[cfg(test)]
@@ -80,5 +97,25 @@ mod tests {
     fn from_env_errors_on_missing_secret() {
         let get = |_: &str| None;
         assert!(AppConfig::from_getter(&get).is_err());
+    }
+
+    #[test]
+    fn base_url_requires_https_except_localhost() {
+        for ok in [
+            "https://buy.example",
+            "http://localhost",
+            "http://localhost:8080",
+            "http://127.0.0.1:8080/shop",
+        ] {
+            assert!(validate_base_url(ok.into()).is_ok(), "{ok} should pass");
+        }
+        for bad in [
+            "http://buy.example",
+            "http://localhost.evil.example",
+            "ftp://buy.example",
+            "buy.example",
+        ] {
+            assert!(validate_base_url(bad.into()).is_err(), "{bad} should fail");
+        }
     }
 }

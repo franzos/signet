@@ -5,6 +5,14 @@
 ### Added
 - Email on purchase (optional): the buyer receives their license and expiry, and the operator gets a sale notice. Providers are SMTP and Lettermint (via Polymail's `ProviderConfig`). Configured in an `[email]` table in `catalog.toml`, with `SIGNET_EMAIL__*` env vars overriding per field (env wins) so secrets stay out of the file; `enabled = false` or no provider disables it. Mail failures never block license delivery.
 
+### Changed
+- Shop refuses to start with a non-https `BASE_URL` (plain http stays allowed for localhost)
+- `signetlib` reports failures through its own error type instead of `anyhow`
+
+### Fixed
+- An unknown or expired checkout session now shows a clear "not found" page instead of alternating between a server error and "payment is still processing"
+- Rate limiter no longer accumulates per-IP state forever; stale entries are pruned periodically
+
 ## [0.1.1] - 2026-07-08
 
 ### Changed

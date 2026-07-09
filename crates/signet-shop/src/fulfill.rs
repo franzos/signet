@@ -1,6 +1,7 @@
 use anyhow::{anyhow, Result};
 use chrono::Utc;
 
+use crate::cache::NegEntry;
 use crate::catalog::Sku;
 use crate::db::{self, StoredLicense};
 use crate::mail::PurchaseNotice;
@@ -10,6 +11,8 @@ use crate::state::AppState;
 pub enum FulfillOutcome {
     Ready(StoredLicense),
     Pending,
+    /// Stripe has no such session: unknown or long-expired id.
+    LookupFailed,
 }
 
 pub async fn fulfill(state: &AppState, session_id: &str) -> Result<FulfillOutcome> {
@@ -19,20 +22,24 @@ pub async fn fulfill(state: &AppState, session_id: &str) -> Result<FulfillOutcom
         return Ok(FulfillOutcome::Ready(existing));
     }
     // Recently checked and still not fulfillable: skip the Stripe round-trip.
-    if state.neg_cache.contains(session_id) {
-        return Ok(FulfillOutcome::Pending);
+    match state.neg_cache.get(session_id) {
+        Some(NegEntry::Unpaid) => return Ok(FulfillOutcome::Pending),
+        Some(NegEntry::NotFound) => return Ok(FulfillOutcome::LookupFailed),
+        None => {}
     }
-    let info = match payments::retrieve_session(&state.stripe, session_id).await {
-        Ok(info) => info,
-        Err(e) => {
-            // Unknown/expired id: cache it so a flood of the same id costs one call.
-            state.neg_cache.insert(session_id.to_string());
-            return Err(e);
-        }
+    // A definitive not-found is cached so a flood of the same id costs one
+    // call; transient Stripe errors are not, so recovery is immediate.
+    let Some(info) = payments::retrieve_session(&state.stripe, session_id).await? else {
+        state
+            .neg_cache
+            .insert(session_id.to_string(), NegEntry::NotFound);
+        return Ok(FulfillOutcome::LookupFailed);
     };
     let outcome = fulfill_paid_session(state, &info).await?;
     if matches!(outcome, FulfillOutcome::Pending) {
-        state.neg_cache.insert(session_id.to_string());
+        state
+            .neg_cache
+            .insert(session_id.to_string(), NegEntry::Unpaid);
     }
     Ok(outcome)
 }

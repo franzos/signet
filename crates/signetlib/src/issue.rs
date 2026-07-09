@@ -29,7 +29,7 @@ pub fn issue(
     params: IssueParams,
     now_unix: i64,
     signing_key: &SigningKey,
-) -> anyhow::Result<Issued> {
+) -> Result<Issued, codec::Error> {
     let claims = Claims {
         v: BLOB_VERSION,
         license_id: random_license_id(),

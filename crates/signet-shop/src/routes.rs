@@ -35,6 +35,18 @@ pub fn router(state: AppState) -> Router {
         .key_extractor(SmartIpKeyExtractor)
         .finish()
         .expect("valid governor config");
+    // The keyed limiters never evict idle keys on their own; prune both
+    // periodically so the per-IP state map stays bounded.
+    let peer_limiter = peer_cfg.limiter().clone();
+    let smart_limiter = smart_cfg.limiter().clone();
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            tick.tick().await;
+            peer_limiter.retain_recent();
+            smart_limiter.retain_recent();
+        }
+    });
     // Routes defined once; the two branches only differ in the layer's key
     // extractor type, and `.layer()` erases the service so both are Router<AppState>.
     let limited_base = || {
@@ -359,6 +371,14 @@ struct SuccessTemplate {
     chrome: Chrome,
 }
 
+#[derive(askama::Template)]
+#[template(path = "error.html")]
+struct ErrorTemplate {
+    title: &'static str,
+    message: &'static str,
+    chrome: Chrome,
+}
+
 async fn success(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -383,6 +403,16 @@ async fn success(
             product: String::new(),
             chrome: ch,
         }),
+        Ok(fulfill::FulfillOutcome::LookupFailed) => (
+            StatusCode::NOT_FOUND,
+            page(&ErrorTemplate {
+                title: "Checkout session not found",
+                message: "We could not find this checkout session. \
+                          Check the link you followed, or contact support.",
+                chrome: ch,
+            }),
+        )
+            .into_response(),
         Err(e) => {
             // Never log q.session_id: it is the bearer secret for this endpoint.
             tracing::error!("fulfill failed: {e:#}");
@@ -419,8 +449,8 @@ async fn success_download(
             )
                 .into_response()
         }
-        // Not paid yet: send them back to the status page to refresh.
-        Ok(fulfill::FulfillOutcome::Pending) => {
+        // Not paid yet or unknown: the status page explains either case.
+        Ok(fulfill::FulfillOutcome::Pending | fulfill::FulfillOutcome::LookupFailed) => {
             Redirect::to(&format!("/success?session_id={}", q.session_id)).into_response()
         }
         Err(e) => {

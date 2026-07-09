@@ -2,17 +2,39 @@
 //! verification. Your application pulls a near-identical decoder into its
 //! own license verifier; keep them in sync.
 
-use anyhow::{anyhow, bail, Context};
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey, SIGNATURE_LENGTH};
 
 use crate::claims::{Claims, SignedBlob, BLOB_MAGIC, BLOB_VERSION};
 
+/// Failure modes for encoding, issuing, and key loading. Decoding has its
+/// own [`DecodeError`].
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("read {}", path.display())]
+    ReadKey {
+        path: std::path::PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("key at {} is {len} bytes, expected 32", path.display())]
+    KeyLength {
+        path: std::path::PathBuf,
+        len: usize,
+    },
+    #[error("invalid verifying key")]
+    VerifyingKey(#[source] ed25519_dalek::SignatureError),
+    #[error("encode claims")]
+    EncodeClaims(#[source] ciborium::ser::Error<std::io::Error>),
+    #[error("encode envelope")]
+    EncodeEnvelope(#[source] ciborium::ser::Error<std::io::Error>),
+}
+
 /// Encode a signed license into the wire blob. Signs the canonical CBOR
 /// encoding of `claims` and wraps it in the envelope.
-pub fn encode(claims: &Claims, signing_key: &SigningKey) -> anyhow::Result<String> {
+pub fn encode(claims: &Claims, signing_key: &SigningKey) -> Result<String, Error> {
     let mut claims_cbor = Vec::new();
-    ciborium::into_writer(claims, &mut claims_cbor).context("encode claims")?;
+    ciborium::into_writer(claims, &mut claims_cbor).map_err(Error::EncodeClaims)?;
     let signature = signing_key.sign(&claims_cbor);
     let blob = SignedBlob {
         claims_cbor,
@@ -22,7 +44,7 @@ pub fn encode(claims: &Claims, signing_key: &SigningKey) -> anyhow::Result<Strin
     let mut envelope = Vec::with_capacity(64);
     envelope.extend_from_slice(BLOB_MAGIC);
     envelope.push(BLOB_VERSION);
-    ciborium::into_writer(&blob, &mut envelope).context("encode envelope")?;
+    ciborium::into_writer(&blob, &mut envelope).map_err(Error::EncodeEnvelope)?;
 
     Ok(B64.encode(envelope))
 }
@@ -99,29 +121,23 @@ pub fn decode_and_verify(b64: &str, verifying_key: &VerifyingKey) -> Result<Clai
 }
 
 /// Convenience for the CLI: load a raw 32-byte verifying key from disk.
-pub fn load_verifying_key(path: &std::path::Path) -> anyhow::Result<VerifyingKey> {
-    let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
-    if bytes.len() != 32 {
-        bail!(
-            "verifying key at {} is {} bytes, expected 32",
-            path.display(),
-            bytes.len()
-        );
-    }
-    let arr: [u8; 32] = bytes.as_slice().try_into().unwrap();
-    VerifyingKey::from_bytes(&arr).map_err(|e| anyhow!("verifying key: {e}"))
+pub fn load_verifying_key(path: &std::path::Path) -> Result<VerifyingKey, Error> {
+    let arr = read_key_bytes(path)?;
+    VerifyingKey::from_bytes(&arr).map_err(Error::VerifyingKey)
 }
 
 /// Convenience for the CLI: load a raw 32-byte signing key from disk.
-pub fn load_signing_key(path: &std::path::Path) -> anyhow::Result<SigningKey> {
-    let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
-    if bytes.len() != 32 {
-        bail!(
-            "signing key at {} is {} bytes, expected 32",
-            path.display(),
-            bytes.len()
-        );
-    }
-    let arr: [u8; 32] = bytes.as_slice().try_into().unwrap();
-    Ok(SigningKey::from_bytes(&arr))
+pub fn load_signing_key(path: &std::path::Path) -> Result<SigningKey, Error> {
+    Ok(SigningKey::from_bytes(&read_key_bytes(path)?))
+}
+
+fn read_key_bytes(path: &std::path::Path) -> Result<[u8; 32], Error> {
+    let bytes = std::fs::read(path).map_err(|source| Error::ReadKey {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    bytes.as_slice().try_into().map_err(|_| Error::KeyLength {
+        path: path.to_path_buf(),
+        len: bytes.len(),
+    })
 }
