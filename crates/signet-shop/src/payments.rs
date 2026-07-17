@@ -23,6 +23,9 @@ pub struct SessionInfo {
     /// Company name, from the checkout "company" custom field.
     pub company: Option<String>,
     pub url: Option<String>,
+    pub amount_total: Option<i64>,
+    pub currency: Option<Currency>,
+    pub livemode: bool,
 }
 
 impl SessionInfo {
@@ -48,11 +51,28 @@ impl SessionInfo {
             paid,
             sku: s.metadata.as_ref().and_then(|m| m.get("sku").cloned()),
             email,
-            name,
-            company,
+            // Buyer-typed text that reaches mail and the signed license claims.
+            name: name.map(|n| sanitize_text(&n)).filter(|n| !n.is_empty()),
+            company: company.map(|c| sanitize_text(&c)).filter(|c| !c.is_empty()),
             url: s.url.clone(),
+            amount_total: s.amount_total,
+            currency: s.currency.clone(),
+            livemode: s.livemode,
         }
     }
+}
+
+/// Sanitize buyer-controlled text before it reaches email display names,
+/// notice bodies, or signed license claims: trim, drop ASCII control
+/// characters (header/log injection), cap at 200 chars.
+fn sanitize_text(s: &str) -> String {
+    s.chars()
+        .filter(|c| !c.is_ascii_control())
+        .collect::<String>()
+        .trim()
+        .chars()
+        .take(200)
+        .collect()
 }
 
 pub async fn create_checkout_session(
@@ -189,6 +209,24 @@ pub async fn ensure_price(
         .await
         .context("create price")?;
     Ok(price.id.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize_text;
+
+    #[test]
+    fn sanitize_strips_controls_trims_and_caps() {
+        assert_eq!(sanitize_text("  Acme GmbH  "), "Acme GmbH");
+        assert_eq!(
+            sanitize_text("Acme\r\nBcc: evil@x\tCorp"),
+            "AcmeBcc: evil@xCorp"
+        );
+        assert_eq!(sanitize_text("\x00\x1b[31mAcme\x7f"), "[31mAcme");
+        let capped = sanitize_text(&"ä".repeat(300));
+        assert_eq!(capped.chars().count(), 200);
+        assert_eq!(sanitize_text("\r\n \t"), "");
+    }
 }
 
 /// Integration tests against Stripe test mode. They run only when a test key is

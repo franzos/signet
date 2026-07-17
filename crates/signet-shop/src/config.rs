@@ -56,15 +56,17 @@ impl AppConfig {
 }
 
 /// BASE_URL ends up in Stripe success/cancel URLs; a plain-http value would
-/// send the session id bearer secret over the wire in clear.
+/// send the session id bearer secret over the wire in clear. Trailing slashes
+/// are trimmed so `{base_url}/success` never yields `//success` (a 404).
 fn validate_base_url(url: String) -> Result<String> {
+    let trimmed = || url.trim_end_matches('/').to_string();
     if url.starts_with("https://") {
-        return Ok(url);
+        return Ok(trimmed());
     }
     if let Some(rest) = url.strip_prefix("http://") {
         let host = rest.split(['/', ':']).next().unwrap_or("");
         if host == "localhost" || host == "127.0.0.1" {
-            return Ok(url);
+            return Ok(trimmed());
         }
     }
     Err(anyhow!(
@@ -117,5 +119,25 @@ mod tests {
         ] {
             assert!(validate_base_url(bad.into()).is_err(), "{bad} should fail");
         }
+    }
+
+    #[test]
+    fn base_url_trims_trailing_slashes() {
+        assert_eq!(
+            validate_base_url("https://buy.example/".into()).unwrap(),
+            "https://buy.example"
+        );
+        assert_eq!(
+            validate_base_url("https://buy.example//".into()).unwrap(),
+            "https://buy.example"
+        );
+        assert_eq!(
+            validate_base_url("http://localhost:8080/".into()).unwrap(),
+            "http://localhost:8080"
+        );
+        assert_eq!(
+            validate_base_url("https://buy.example/shop".into()).unwrap(),
+            "https://buy.example/shop"
+        );
     }
 }

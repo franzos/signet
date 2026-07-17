@@ -25,6 +25,9 @@ pub const BLOB_MAGIC: &[u8; 4] = b"OPLB";
 /// field; older apps reject unknown versions.
 pub const BLOB_VERSION: u8 = 1;
 
+/// Schema version stamped into [`Claims::v`]; independent of [`BLOB_VERSION`].
+pub const CLAIMS_VERSION: u8 = 1;
+
 /// CBOR-serialised payload inside the signed blob.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SignedBlob {

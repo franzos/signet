@@ -172,31 +172,55 @@ impl MailService {
     }
 
     /// Send both notifications, logging (never propagating) any failure so a mail
-    /// outage can never block or reverse license delivery.
+    /// outage can never block or reverse license delivery. Each send gets one
+    /// bounded retry to ride out a transient transport blip.
     pub async fn notify_purchase(&self, n: &PurchaseNotice) {
         if n.buyer_email.is_empty() {
             tracing::warn!("purchase has no buyer email; skipping license email");
         } else {
             match self.build_license_email(n) {
                 Ok(email) => {
-                    if let Err(e) = self.mailer.send(&email).await {
-                        tracing::error!("failed to send license email: {e}");
+                    if let Err(e) = self.send_with_retry(&email).await {
+                        tracing::error!(
+                            license_id = %n.license_id,
+                            buyer = %n.buyer_email,
+                            "purchase email failed permanently (license email): {e}"
+                        );
                     }
                 }
-                Err(e) => tracing::error!("failed to build license email: {e}"),
+                Err(e) => tracing::error!(
+                    license_id = %n.license_id,
+                    buyer = %n.buyer_email,
+                    "failed to build license email: {e}"
+                ),
             }
         }
 
         if let Some(operator) = &self.operator {
             match self.build_operator_email(operator, n) {
                 Ok(email) => {
-                    if let Err(e) = self.mailer.send(&email).await {
-                        tracing::error!("failed to send operator notice: {e}");
+                    if let Err(e) = self.send_with_retry(&email).await {
+                        tracing::error!(
+                            license_id = %n.license_id,
+                            "purchase email failed permanently (operator notice): {e}"
+                        );
                     }
                 }
                 Err(e) => tracing::error!("failed to build operator notice: {e}"),
             }
         }
+    }
+
+    /// One retry after a short pause; a longer queue is not worth the moving
+    /// parts here, the permanent-failure log line is the operator's signal.
+    async fn send_with_retry(&self, email: &Email) -> Result<(), polymail::SendError> {
+        const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(5);
+        let Err(first) = self.mailer.send(email).await else {
+            return Ok(());
+        };
+        tracing::warn!("email send failed, retrying once in {RETRY_DELAY:?}: {first}");
+        tokio::time::sleep(RETRY_DELAY).await;
+        self.mailer.send(email).await.map(|_| ())
     }
 
     fn build_license_email(&self, n: &PurchaseNotice) -> Result<Email> {

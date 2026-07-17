@@ -25,9 +25,12 @@ pub(crate) fn ensure_crypto_provider() {
 #[tokio::main]
 async fn main() -> Result<()> {
     ensure_crypto_provider();
+    // stripe_webhook's `parse_payload` span captures the raw webhook payload
+    // (buyer PII); drop that crate's sub-error events so it never hits the logs.
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "info,stripe_webhook=error".into()),
         )
         .init();
 

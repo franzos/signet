@@ -1,9 +1,10 @@
 //! Encode / decode the on-wire license blob, and run signature
-//! verification. Your application pulls a near-identical decoder into its
-//! own license verifier; keep them in sync.
+//! verification against one or more trusted public keys. Your application
+//! pulls a near-identical decoder into its own license verifier; keep them
+//! in sync.
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey, SIGNATURE_LENGTH};
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey, SIGNATURE_LENGTH};
 
 use crate::claims::{Claims, SignedBlob, BLOB_MAGIC, BLOB_VERSION};
 
@@ -57,7 +58,7 @@ pub enum DecodeError {
     /// Couldn't base64-decode, doesn't carry the magic, unknown version, or
     /// CBOR parse failure.
     Malformed(String),
-    /// Parses fine, but the signature doesn't verify against the configured
+    /// Parses fine, but the signature doesn't verify against any configured
     /// public key. Either tampered or signed with the wrong key.
     BadSignature,
 }
@@ -73,11 +74,31 @@ impl std::fmt::Display for DecodeError {
 
 impl std::error::Error for DecodeError {}
 
+/// Upper bound on accepted input, enforced before any decode work.
+/// A legitimate blob is well under 4 KB.
+const MAX_BLOB_B64_LEN: usize = 16 * 1024;
+
 /// Decode a base64-encoded license blob and verify its signature against
 /// `verifying_key`. Returns the parsed claims on success.
 pub fn decode_and_verify(b64: &str, verifying_key: &VerifyingKey) -> Result<Claims, DecodeError> {
+    decode_and_verify_any(b64, std::slice::from_ref(verifying_key))
+}
+
+/// Like [`decode_and_verify`], but accepts the blob if its signature
+/// verifies against *any* of `verifying_keys`. Lets an app embed both the
+/// offline root public key and the shop's revocable web public key: rotating
+/// the web key after a shop compromise doesn't invalidate root-signed
+/// licenses. An empty slice yields [`DecodeError::BadSignature`].
+pub fn decode_and_verify_any(
+    b64: &str,
+    verifying_keys: &[VerifyingKey],
+) -> Result<Claims, DecodeError> {
+    let b64 = b64.trim();
+    if b64.len() > MAX_BLOB_B64_LEN {
+        return Err(DecodeError::Malformed("blob too large".into()));
+    }
     let bytes = B64
-        .decode(b64.trim())
+        .decode(b64)
         .map_err(|e| DecodeError::Malformed(format!("base64: {e}")))?;
 
     if bytes.len() < BLOB_MAGIC.len() + 1 {
@@ -110,9 +131,12 @@ pub fn decode_and_verify(b64: &str, verifying_key: &VerifyingKey) -> Result<Clai
         .expect("checked length above");
     let signature = Signature::from_bytes(&sig_bytes);
 
-    verifying_key
-        .verify(&blob.claims_cbor, &signature)
-        .map_err(|_| DecodeError::BadSignature)?;
+    if !verifying_keys
+        .iter()
+        .any(|key| key.verify_strict(&blob.claims_cbor, &signature).is_ok())
+    {
+        return Err(DecodeError::BadSignature);
+    }
 
     let claims: Claims = ciborium::from_reader(blob.claims_cbor.as_slice())
         .map_err(|e| DecodeError::Malformed(format!("claims cbor: {e}")))?;
@@ -140,4 +164,65 @@ fn read_key_bytes(path: &std::path::Path) -> Result<[u8; 32], Error> {
         path: path.to_path_buf(),
         len: bytes.len(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::claims::CLAIMS_VERSION;
+
+    fn test_claims() -> Claims {
+        Claims {
+            v: CLAIMS_VERSION,
+            license_id: "abc123".into(),
+            customer: "Acme GmbH".into(),
+            email: "admin@acme.example".into(),
+            tier: "business".into(),
+            product: "acme".into(),
+            issued_at: 1_700_000_000,
+            expires_at: None,
+            features: vec![],
+            max_orgs: None,
+            max_seats: None,
+            note: String::new(),
+        }
+    }
+
+    #[test]
+    fn verify_any_accepts_second_key() {
+        let signer = SigningKey::from_bytes(&[9u8; 32]);
+        let other = SigningKey::from_bytes(&[1u8; 32]);
+        let blob = encode(&test_claims(), &signer).unwrap();
+
+        let keys = [other.verifying_key(), signer.verifying_key()];
+        let claims = decode_and_verify_any(&blob, &keys).unwrap();
+        assert_eq!(claims.customer, "Acme GmbH");
+    }
+
+    #[test]
+    fn verify_any_rejects_when_no_key_matches() {
+        let signer = SigningKey::from_bytes(&[9u8; 32]);
+        let other = SigningKey::from_bytes(&[1u8; 32]);
+        let blob = encode(&test_claims(), &signer).unwrap();
+
+        let keys = [other.verifying_key()];
+        assert!(matches!(
+            decode_and_verify_any(&blob, &keys),
+            Err(DecodeError::BadSignature)
+        ));
+        assert!(matches!(
+            decode_and_verify_any(&blob, &[]),
+            Err(DecodeError::BadSignature)
+        ));
+    }
+
+    #[test]
+    fn oversized_input_rejected_before_decoding() {
+        let key = SigningKey::from_bytes(&[9u8; 32]);
+        let huge = "A".repeat(MAX_BLOB_B64_LEN + 1);
+        assert!(matches!(
+            decode_and_verify(&huge, &key.verifying_key()),
+            Err(DecodeError::Malformed(_))
+        ));
+    }
 }

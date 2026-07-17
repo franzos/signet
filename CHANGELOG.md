@@ -1,5 +1,26 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- Separate revocable web signing keys: `signet-issuer keygen --web` mints `web-{private,public}.bin`; the shop now loads only the web key, so the root key stays offline and a shop compromise is fixed by rotating the web key
+- `signetlib`: `decode_and_verify_any` verifies a license against multiple public keys (root + web)
+- Weekly scheduled CI run of `cargo deny check advisories` that fails on new advisories
+
+### Changed
+- Fulfillment cross-checks the paid amount, currency, and livemode against the catalog SKU before issuing a license
+- Buyer-typed company/name fields are sanitized (control characters stripped, capped) before reaching emails and signed claims
+- License verification uses strict Ed25519 signature checking and rejects oversized blobs before parsing
+- Catalog validation rejects non-positive prices and unreasonable term lengths
+- Docker image runs as a non-root user
+- Buyer purchase emails retry once on transient failure and log loudly on permanent failure
+
+### Fixed
+- `BASE_URL` with a trailing slash no longer breaks the post-payment redirect
+- `keygen` no longer leaves a private key with loose permissions when overwriting with `--force`
+- Ledger files are created readable only by the owner (0600)
+- Stripe webhook payloads (buyer PII) are kept out of logs
+
 ## [0.1.2] - 2026-07-09
 
 ### Added

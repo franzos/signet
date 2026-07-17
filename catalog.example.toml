@@ -61,8 +61,8 @@ url = "mailto:sales@example.com"
 # entity = "example.com"     # -> data-entity
 # module = true              # -> type="module"
 
-# A category is a product line. Its `id` selects the signing key
-# (keys/<id>/private.bin) and is stamped into the license as the `product`
+# A category is a product line. Its `id` selects the web signing key
+# (keys/<id>/web-private.bin) and is stamped into the license as the `product`
 # claim, so an Acme purchase only verifies against Acme's public key and a
 # Globex purchase only against Globex's, never each other's.
 [[category]]

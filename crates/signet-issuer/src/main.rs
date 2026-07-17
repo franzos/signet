@@ -35,13 +35,21 @@ struct Cli {
 #[derive(Subcommand, Debug)]
 enum Cmd {
     /// Generate a fresh Ed25519 keypair. Writes the 32-byte raw private key
-    /// and matching public key to disk. The public key file is what gets
+    /// and matching public key to disk. The public key file(s) are what get
     /// baked into your application's license verifier.
     Keygen {
         /// Product this keypair belongs to (e.g. "acme", "globex").
-        /// Keys are written to `keys/<product>/{private,public}.bin`.
+        /// Keys are written to `keys/<product>/{private,public}.bin`
+        /// (with `--web`: `web-{private,public}.bin`).
         #[arg(long)]
         product: String,
+        /// Generate the shop's web keypair instead of the offline root
+        /// one. The web private key is the one the shop process loads;
+        /// verifiers should accept both public keys (root + web) so the
+        /// web key can be rotated without invalidating root-signed
+        /// licenses.
+        #[arg(long)]
+        web: bool,
         /// Overwrite existing key files. Without this, keygen refuses to
         /// clobber to prevent accidental key loss.
         #[arg(long)]
@@ -109,7 +117,11 @@ enum Cmd {
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Keygen { product, force } => cmd_keygen(&product, force),
+        Cmd::Keygen {
+            product,
+            web,
+            force,
+        } => cmd_keygen(&product, web, force),
         Cmd::Issue {
             product,
             private_key,
@@ -143,16 +155,20 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
-fn cmd_keygen(product: &str, force: bool) -> anyhow::Result<()> {
+fn cmd_keygen(product: &str, web: bool, force: bool) -> anyhow::Result<()> {
     let out_dir = Path::new("keys").join(product);
     std::fs::create_dir_all(&out_dir).with_context(|| format!("mkdir {}", out_dir.display()))?;
 
-    let priv_path = out_dir.join("private.bin");
-    let pub_path = out_dir.join("public.bin");
-    if (priv_path.exists() || pub_path.exists()) && !force {
+    let (priv_name, pub_name) = if web {
+        ("web-private.bin", "web-public.bin")
+    } else {
+        ("private.bin", "public.bin")
+    };
+    let priv_path = out_dir.join(priv_name);
+    let pub_path = out_dir.join(pub_name);
+    if pub_path.exists() && !force {
         bail!(
-            "{} or {} already exists; pass --force to overwrite (DANGEROUS — invalidates every license signed with the old key)",
-            priv_path.display(),
+            "{} already exists; pass --force to overwrite (DANGEROUS — invalidates every license signed with the old key)",
             pub_path.display()
         );
     }
@@ -162,17 +178,28 @@ fn cmd_keygen(product: &str, force: bool) -> anyhow::Result<()> {
     let signing = SigningKey::from_bytes(&seed);
     let verifying = signing.verifying_key();
 
-    write_restricted(&priv_path, signing.to_bytes().as_ref())?;
+    write_restricted(&priv_path, signing.to_bytes().as_ref(), force)?;
     std::fs::write(&pub_path, verifying.to_bytes())
         .with_context(|| format!("write {}", pub_path.display()))?;
 
     println!("Wrote private key: {}", priv_path.display());
     println!("Wrote public key:  {}", pub_path.display());
     println!();
-    println!(
-        "Copy {} into your application's license verifier and rebuild.",
-        pub_path.display()
-    );
+    if web {
+        println!(
+            "Mount {} into the shop process; it is the key the shop loads for signing.",
+            priv_path.display()
+        );
+        println!(
+            "Keep {} offline. Your application verifier should accept BOTH public keys (root + web) via decode_and_verify_any.",
+            out_dir.join("private.bin").display()
+        );
+    } else {
+        println!(
+            "Copy {} into your application's license verifier and rebuild.",
+            pub_path.display()
+        );
+    }
     Ok(())
 }
 
@@ -326,22 +353,8 @@ fn append_ledger(path: &Path, row: &LedgerRow) -> anyhow::Result<()> {
         std::fs::create_dir_all(parent).with_context(|| format!("mkdir {}", parent.display()))?;
     }
     use std::io::Write;
-    let mut f = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .with_context(|| format!("open ledger {}", path.display()))?;
-    let line = serde_json::to_string(row)?;
-    writeln!(f, "{line}")?;
-    Ok(())
-}
-
-/// Write a file with 0o600 perms on Unix (private key hygiene). On other
-/// platforms falls back to a plain write.
-fn write_restricted(path: &Path, contents: &[u8]) -> anyhow::Result<()> {
-    use std::io::Write;
     let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create(true).truncate(true);
+    opts.create(true).append(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
@@ -349,7 +362,47 @@ fn write_restricted(path: &Path, contents: &[u8]) -> anyhow::Result<()> {
     }
     let mut f = opts
         .open(path)
-        .with_context(|| format!("open {} for write", path.display()))?;
+        .with_context(|| format!("open ledger {}", path.display()))?;
+    // Rows carry customer PII; tighten pre-existing looser files too.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        f.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("chmod ledger {}", path.display()))?;
+    }
+    let line = serde_json::to_string(row)?;
+    writeln!(f, "{line}")?;
+    Ok(())
+}
+
+/// Write a file with 0o600 perms on Unix (private key hygiene). Without
+/// `force`, refuses to overwrite (create_new avoids the check-then-create
+/// race); with `force`, removes the old file first so the fresh key is
+/// always created 0600. On other platforms falls back to a plain write.
+fn write_restricted(path: &Path, contents: &[u8], force: bool) -> anyhow::Result<()> {
+    use std::io::Write;
+    if force {
+        match std::fs::remove_file(path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e).with_context(|| format!("remove {}", path.display())),
+        }
+    }
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut f = match opts.open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => bail!(
+            "{} already exists; pass --force to overwrite (DANGEROUS — invalidates every license signed with the old key)",
+            path.display()
+        ),
+        Err(e) => return Err(e).with_context(|| format!("open {} for write", path.display())),
+    };
     f.write_all(contents)?;
     Ok(())
 }

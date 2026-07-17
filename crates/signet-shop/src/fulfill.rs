@@ -65,6 +65,17 @@ pub async fn fulfill_paid_session(
         .catalog
         .by_id(sku_id)
         .ok_or_else(|| anyhow!("unknown sku in session metadata"))?;
+    // Trust Stripe's signature, but not the session's economics: a session that
+    // paid less, in another currency, or in the wrong mode never mints. Pending
+    // (not an error) keeps the webhook 2xx so Stripe does not retry forever.
+    let expect_livemode = state.cfg.stripe_api_key.starts_with("sk_live");
+    if let Some(reason) = payment_mismatch(session, sku, expect_livemode) {
+        tracing::warn!(
+            sku = %sku.id,
+            "payment verification failed, not issuing: {reason}"
+        );
+        return Ok(FulfillOutcome::Pending);
+    }
     let signing = state
         .signing
         .get(sku.category.as_str())
@@ -118,6 +129,38 @@ pub async fn fulfill_paid_session(
         }
     }
     Ok(FulfillOutcome::Ready(stored))
+}
+
+/// Cross-check the session's economics against the catalog SKU. Returns the
+/// failed check, or `None` when the session is safe to fulfill.
+fn payment_mismatch(session: &SessionInfo, sku: &Sku, expect_livemode: bool) -> Option<String> {
+    if session.livemode != expect_livemode {
+        return Some(format!(
+            "livemode is {} but the configured key expects {}",
+            session.livemode, expect_livemode
+        ));
+    }
+    match session.amount_total {
+        Some(a) if a >= sku.amount_cents => {}
+        other => {
+            return Some(format!(
+                "amount_total {other:?} is below the sku price {}",
+                sku.amount_cents
+            ));
+        }
+    }
+    let currency_ok = session.currency.as_ref().is_some_and(|c| {
+        c.to_string()
+            .eq_ignore_ascii_case(&sku.currency.to_string())
+    });
+    if !currency_ok {
+        return Some(format!(
+            "currency {:?} does not match the sku currency {}",
+            session.currency.as_ref().map(ToString::to_string),
+            sku.currency
+        ));
+    }
+    None
 }
 
 /// A human price for the operator notice: the catalog label when set, otherwise
@@ -216,6 +259,10 @@ term = "365d"
             name: Some("Jane Buyer".into()),
             company: Some("Acme GmbH".into()),
             url: None,
+            amount_total: Some(49900),
+            currency: Some(stripe_types::Currency::EUR),
+            // Matches the test key ("sk_test_dummy" -> expect livemode false).
+            livemode: false,
         }
     }
 
@@ -240,6 +287,62 @@ term = "365d"
             FulfillOutcome::Ready(r) => assert_eq!(r.blob, blob),
             _ => panic!("expected Ready"),
         }
+    }
+
+    #[tokio::test]
+    async fn underpaid_session_is_not_fulfilled() {
+        let state = test_state().await;
+        let mut s = paid_session("cs_underpaid", "acme-business-annual");
+        s.amount_total = Some(49899);
+        assert!(matches!(
+            super::fulfill_paid_session(&state, &s).await.unwrap(),
+            FulfillOutcome::Pending
+        ));
+        s.amount_total = None;
+        assert!(matches!(
+            super::fulfill_paid_session(&state, &s).await.unwrap(),
+            FulfillOutcome::Pending
+        ));
+    }
+
+    #[tokio::test]
+    async fn currency_mismatch_is_not_fulfilled() {
+        let state = test_state().await;
+        let mut s = paid_session("cs_currency", "acme-business-annual");
+        s.currency = Some(stripe_types::Currency::USD);
+        assert!(matches!(
+            super::fulfill_paid_session(&state, &s).await.unwrap(),
+            FulfillOutcome::Pending
+        ));
+        s.currency = None;
+        assert!(matches!(
+            super::fulfill_paid_session(&state, &s).await.unwrap(),
+            FulfillOutcome::Pending
+        ));
+    }
+
+    #[tokio::test]
+    async fn livemode_mismatch_is_not_fulfilled() {
+        let state = test_state().await;
+        let mut s = paid_session("cs_livemode", "acme-business-annual");
+        // Test key configured, but a live-mode session arrives.
+        s.livemode = true;
+        assert!(matches!(
+            super::fulfill_paid_session(&state, &s).await.unwrap(),
+            FulfillOutcome::Pending
+        ));
+    }
+
+    #[test]
+    fn payment_mismatch_accepts_exact_and_overpaid() {
+        let cat = test_catalog();
+        let sku = cat.by_id("acme-business-annual").unwrap();
+        let s = paid_session("cs_ok", "acme-business-annual");
+        assert_eq!(super::payment_mismatch(&s, sku, false), None);
+        let mut over = paid_session("cs_over", "acme-business-annual");
+        over.amount_total = Some(50000);
+        assert_eq!(super::payment_mismatch(&over, sku, false), None);
+        assert!(super::payment_mismatch(&s, sku, true).is_some());
     }
 
     #[tokio::test]

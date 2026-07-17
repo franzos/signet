@@ -27,7 +27,7 @@ A Cargo workspace with three crates:
 
 | Crate | What it is |
 | --- | --- |
-| `signetlib` | The shared library: license claims, Ed25519 signing, and the wire format. Depend on it (or copy `verify.rs`) to check licenses in your own app. |
+| `signetlib` | The shared library: license claims, Ed25519 signing, and the wire format. Depend on it (or copy the decoder into your app) to check licenses. |
 | `signet-issuer` | An offline CLI: generate per-product keypairs, issue license blobs, verify/inspect them. Runs on an air-gapped box if you like. |
 | `signet-shop` | A single-binary web shop: a storefront, Stripe Checkout, and idempotent license fulfillment, all configured from files. |
 
@@ -41,6 +41,13 @@ Two words for one thing: `signetlib` and the CLI call a product line a **product
     # copy keys/acme/public.bin into your app (e.g. src/commercial/pubkey.bin), rebuild
 
 The public half is what you ship in the app; the private half signs licenses and never leaves your keychain.
+
+If you run the shop, generate a second, revocable keypair for it:
+
+    signet-issuer keygen --product acme --web
+    # copy keys/acme/web-public.bin into your app alongside public.bin
+
+The shop process loads `web-private.bin`; the root `private.bin` stays offline. Your app's verifier accepts both public keys (via `decode_and_verify_any`), so if the shop host is ever compromised you rotate the web key and re-issue only web-sold licenses, while root-signed licenses keep working.
 
 ### Issuing a license
 
@@ -61,10 +68,11 @@ Prints the base64 blob to stdout (paste it into your app's license screen) and a
 
 ### Keys and ledger layout
 
-    keys/acme/{private,public}.bin      ledger/acme.jsonl
-    keys/globex/{private,public}.bin    ledger/globex.jsonl
+    keys/acme/{private,public}.bin        ledger/acme.jsonl
+    keys/acme/web-{private,public}.bin    (shop signing key, optional)
+    keys/globex/{private,public}.bin      ledger/globex.jsonl
 
-Back up `keys/` offline. Rotating a product's key invalidates every license already issued for that product (there's no overlap window), so plan to re-issue if you rotate.
+Back up `keys/` offline. Rotating a product's root key invalidates every license already issued for that product (there's no overlap window), so plan to re-issue if you rotate. The web key is the exception: since verifiers accept both keys, it can be rotated without touching root-signed licenses.
 
 ## signet-shop (web app)
 
@@ -76,7 +84,7 @@ Everything site-specific lives in files, not the binary, so one build runs any s
 
 - `catalog.toml` (per-site, git-ignored; path via `CATALOG_PATH`, default `./catalog.toml`) - shop title, `[[category]]` product lines, `[[sku]]` purchasable plans, `[[page]]`/`[[footer_link]]` footer entries, and optional `[analytics]`. Start from `catalog.example.toml`.
 - `content/<slug>.md` (per-site, git-ignored; path via `CONTENT_DIR`, default `./content`) - markdown for Terms, Privacy, and the like, served at `/p/<slug>` and read per request so edits need no restart. Starters in `content.example/`.
-- `keys/<category>/private.bin` - the signing key for each category, as above.
+- `keys/<category>/web-private.bin` - the shop's signing key for each category, from `keygen --web` above (mount it; the root `private.bin` stays offline).
 
 Environment for `serve`: `STRIPE_API_KEY`, `STRIPE_WEBHOOK_SECRET`, `DATABASE_URL` (SQLite), `BASE_URL`, and optional `KEYS_DIR`, `CONTENT_DIR`, `CATALOG_PATH`, `BIND_ADDR` (default `127.0.0.1:8080`).
 
@@ -113,11 +121,13 @@ A prebuilt image is published to the GitHub Container Registry on every tag:
       -v signet-data:/data \
       ghcr.io/franzos/signet serve
 
+The container runs as uid 10001, not root. Bind mounts must be readable by that uid; `keygen` writes private keys 0600 owned by you, so `chown 10001 keys/*/web-private.bin` (or copy the web keys into a dir the container user can read) before starting. The `signet-data` volume is owned by the right uid automatically on first use.
+
 ## Verifying a license in your app
 
-Your app needs the public key and a signature check. Add the library with `cargo add signetlib`; its `codec::decode_and_verify` does it in one call, and the claims are a plain struct you match on. The gist:
+Your app needs the public key(s) and a signature check. Add the library with `cargo add signetlib`; its `codec::decode_and_verify_any` does it in one call, and the claims are a plain struct you match on. Embed both the root and web public keys so either signer verifies. The gist:
 
-    let claims = signetlib::codec::decode_and_verify(&blob, &public_key)?;
+    let claims = signetlib::codec::decode_and_verify_any(&blob, &[root_key, web_key])?;
     if claims.expired(now) { /* grace / lock */ }
     for feature in &claims.features { /* unlock */ }
 

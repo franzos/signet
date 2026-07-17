@@ -2,7 +2,7 @@ use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
 use rand::RngCore;
 
-use crate::claims::{Claims, BLOB_VERSION};
+use crate::claims::{Claims, CLAIMS_VERSION};
 use crate::codec;
 
 /// Everything a caller supplies to mint a license. `now_unix` and the random
@@ -31,7 +31,7 @@ pub fn issue(
     signing_key: &SigningKey,
 ) -> Result<Issued, codec::Error> {
     let claims = Claims {
-        v: BLOB_VERSION,
+        v: CLAIMS_VERSION,
         license_id: random_license_id(),
         customer: params.customer,
         email: params.email,
@@ -86,7 +86,7 @@ mod tests {
         assert_eq!(verified.expires_at, Some(1_800_000_000));
         assert_eq!(verified.features, vec!["orgs", "saml"]);
         assert_eq!(verified.max_orgs, Some(50));
-        assert_eq!(verified.v, crate::claims::BLOB_VERSION);
+        assert_eq!(verified.v, crate::claims::CLAIMS_VERSION);
         assert_eq!(issued.claims.license_id.len(), 32); // hex of 16 bytes
     }
 }

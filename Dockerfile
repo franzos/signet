@@ -23,8 +23,15 @@ FROM debian:trixie-slim
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
+# Non-login system user with a fixed uid so volume ownership is predictable.
+RUN groupadd --system --gid 10001 signet \
+    && useradd --system --uid 10001 --gid signet \
+       --shell /usr/sbin/nologin --no-create-home signet
 WORKDIR /app
 COPY --from=builder /usr/local/bin/signet-shop /app/signet-shop
+# Pre-created and owned by the app user so a fresh named volume inherits that
+# ownership; SQLite needs the directory writable for the DB + WAL sidecars.
+RUN mkdir /data && chown signet:signet /data
 
 # Listen on all interfaces inside the container (the default is loopback-only).
 ENV BIND_ADDR=0.0.0.0:8080
@@ -34,7 +41,10 @@ EXPOSE 8080
 # runtime, e.g.:
 #   -v ./catalog.toml:/app/catalog.toml:ro -v ./keys:/app/keys:ro
 #   -v signet-data:/data -e DATABASE_URL=sqlite:///data/signet.db
+# The process runs as uid 10001: bind mounts must be readable by that uid, and
+# the data volume writable by it.
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s \
   CMD curl -sf http://localhost:8080/ || exit 1
 
+USER signet
 CMD ["./signet-shop", "serve"]

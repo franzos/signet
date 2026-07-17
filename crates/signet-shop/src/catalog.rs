@@ -17,9 +17,9 @@ pub enum Term {
     Days(i64),
 }
 
-/// A product line (e.g. Acme, Globex). Its `id` selects the signing key
-/// (`keys/<id>/private.bin`) and is stamped into the license as the `product`
-/// claim; SKUs reference it via their `category` field.
+/// A product line (e.g. Acme, Globex). Its `id` selects the web signing key
+/// (`keys/<id>/web-private.bin`) and is stamped into the license as the
+/// `product` claim; SKUs reference it via their `category` field.
 #[derive(Debug, Clone)]
 pub struct Category {
     pub id: String,
@@ -314,6 +314,15 @@ pub fn parse(text: &str) -> Result<Catalog> {
                 sc.currency
             );
         }
+        // A non-positive amount would flow into Stripe's unit_amount and let a
+        // paid check pass trivially.
+        if sc.amount_cents <= 0 {
+            bail!(
+                "sku {:?}: amount_cents must be positive, got {}",
+                sc.id,
+                sc.amount_cents
+            );
+        }
         let term = parse_term(&sc.term).with_context(|| format!("sku {:?} term", sc.id))?;
         skus.push(Sku {
             id: sc.id,
@@ -405,8 +414,9 @@ fn parse_term(s: &str) -> Result<Term> {
     let days: i64 = num
         .parse()
         .map_err(|_| anyhow!("term must be \"lifetime\" or \"<days>d\", got {t:?}"))?;
-    if days <= 0 {
-        bail!("term days must be positive, got {days}");
+    // Upper bound (~100 years) keeps `now + days * 86_400` far from overflow.
+    if !(1..=36_500).contains(&days) {
+        bail!("term days must be between 1 and 36500, got {days}");
     }
     Ok(Term::Days(days))
 }
@@ -638,7 +648,9 @@ term = "lifetime"
 
     #[test]
     fn rejects_bad_term() {
-        let bad = r#"
+        for term in ["banana", "0d", "-5d", "36501d", "9223372036854775807d"] {
+            let bad = format!(
+                r#"
 [[category]]
 id = "p"
 name = "P"
@@ -650,8 +662,33 @@ display_name = "X"
 amount_cents = 100
 currency = "eur"
 tier = "t"
-term = "banana"
-"#;
-        assert!(parse(bad).is_err());
+term = "{term}"
+"#
+            );
+            assert!(parse(&bad).is_err(), "term {term:?} should be rejected");
+        }
+    }
+
+    #[test]
+    fn rejects_non_positive_amount() {
+        for amount in ["0", "-100"] {
+            let bad = format!(
+                r#"
+[[category]]
+id = "p"
+name = "P"
+
+[[sku]]
+id = "x"
+category = "p"
+display_name = "X"
+amount_cents = {amount}
+currency = "eur"
+tier = "t"
+term = "lifetime"
+"#
+            );
+            assert!(parse(&bad).is_err(), "amount {amount} should be rejected");
+        }
     }
 }

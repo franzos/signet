@@ -20,7 +20,8 @@ pub struct AppState {
     pub mail: Option<Arc<MailService>>,
 }
 
-/// Load `keys/<category>/private.bin` for every category referenced by the
+/// Load `keys/<category>/web-private.bin` (the revocable web signing key, never
+/// the offline root `private.bin`) for every category referenced by the
 /// catalog. Fails fast at startup if a key is missing or malformed.
 pub fn load_signing_keys(
     cfg: &AppConfig,
@@ -28,14 +29,15 @@ pub fn load_signing_keys(
 ) -> Result<HashMap<String, SigningKey>> {
     let mut map = HashMap::new();
     for category in catalog.category_ids() {
-        let path = cfg.keys_dir.join(category).join("private.bin");
-        let bytes =
-            std::fs::read(&path).with_context(|| format!("read signing key {}", path.display()))?;
-        let arr: [u8; 32] = bytes
-            .as_slice()
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("{} is not 32 bytes", path.display()))?;
-        map.insert(category.to_string(), SigningKey::from_bytes(&arr));
+        let path = cfg.keys_dir.join(category).join("web-private.bin");
+        let key = signetlib::codec::load_signing_key(&path).with_context(|| {
+            format!(
+                "load web signing key {}: run `signet-issuer keygen --product {category} --web` \
+                 and mount only web keys here (the root private.bin stays offline)",
+                path.display()
+            )
+        })?;
+        map.insert(category.to_string(), key);
     }
     Ok(map)
 }
