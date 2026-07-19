@@ -33,6 +33,10 @@ A Cargo workspace with three crates:
 
 Two words for one thing: `signetlib` and the CLI call a product line a **product**; the shop's catalog calls it a **category**. A category id selects the signing key and is stamped into the license as its `product` claim. So a purchase in one product line only ever verifies against that line's public key, never another's.
 
+## Documentation
+
+Full documentation is published at **<https://franzos.github.io/signet/>**: the [operator guide](docs/operator-guide.md) (issuing licenses and running the shop) and the [integration guide](docs/integration-guide.md) (verifying licenses in your app).
+
 ## signet-issuer (CLI)
 
 ### Onboarding a product

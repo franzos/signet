@@ -1,0 +1,20 @@
+# src = "." roots the book at docs/ so pages and the README keep their paths;
+# files not listed in SUMMARY.md are never published.
+[book]
+title = "Signet"
+description = "Sell software licenses without a licensing service: Ed25519-signed, offline-verifiable license keys and a single-binary Stripe shop."
+authors = ["Franz Geffke"]
+language = "en"
+src = "."
+
+[build]
+build-dir = "book"
+
+[output.html]
+git-repository-url = "https://github.com/franzos/signet"
+edit-url-template = "https://github.com/franzos/signet/edit/master/docs/{path}"
+# Project-pages path (franzos.github.io/signet/). Set to "/" for a root-domain deploy.
+site-url = "/signet/"
+
+[output.html.search]
+enable = true

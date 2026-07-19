@@ -6,3 +6,6 @@
 *.db
 *.db-wal
 *.db-shm
+
+# mdBook build output
+/docs/book/
