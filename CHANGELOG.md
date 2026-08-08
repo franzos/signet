@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.1.3] - 2026-08-08
 
 ### Added
 - Separate revocable web signing keys: `signet-issuer keygen --web` mints `web-{private,public}.bin`; the shop now loads only the web key, so the root key stays offline and a shop compromise is fixed by rotating the web key

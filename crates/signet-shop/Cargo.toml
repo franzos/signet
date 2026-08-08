@@ -50,3 +50,7 @@ async-stripe-shared = "=1.0.0-rc.6"
 async-stripe-checkout = { version = "=1.0.0-rc.6", features = ["checkout_session"] }
 async-stripe-product = { version = "=1.0.0-rc.6", features = ["product", "price"] }
 async-stripe-webhook = { version = "=1.0.0-rc.6", features = ["async-stripe-checkout"] }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+tempfile = "3"

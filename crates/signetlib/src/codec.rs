@@ -225,4 +225,180 @@ mod tests {
             Err(DecodeError::Malformed(_))
         ));
     }
+
+    /// Hand-build the wire envelope from raw parts, bypassing `encode`'s
+    /// signing so tests can inject malformed pieces.
+    fn envelope(claims_cbor: Vec<u8>, signature: Vec<u8>) -> String {
+        let blob = SignedBlob {
+            claims_cbor,
+            signature,
+        };
+        let mut env = Vec::new();
+        env.extend_from_slice(BLOB_MAGIC);
+        env.push(BLOB_VERSION);
+        ciborium::into_writer(&blob, &mut env).unwrap();
+        B64.encode(env)
+    }
+
+    #[test]
+    fn tampered_signature_is_bad_signature() {
+        let signer = SigningKey::from_bytes(&[9u8; 32]);
+        let mut bytes = B64
+            .decode(encode(&test_claims(), &signer).unwrap())
+            .unwrap();
+        *bytes.last_mut().unwrap() ^= 0x01;
+        assert!(matches!(
+            decode_and_verify(&B64.encode(bytes), &signer.verifying_key()),
+            Err(DecodeError::BadSignature)
+        ));
+    }
+
+    #[test]
+    fn wrong_magic_is_malformed() {
+        let signer = SigningKey::from_bytes(&[9u8; 32]);
+        let mut bytes = B64
+            .decode(encode(&test_claims(), &signer).unwrap())
+            .unwrap();
+        bytes[0] = b'X';
+        assert!(matches!(
+            decode_and_verify(&B64.encode(bytes), &signer.verifying_key()),
+            Err(DecodeError::Malformed(_))
+        ));
+    }
+
+    #[test]
+    fn unsupported_version_is_malformed() {
+        let signer = SigningKey::from_bytes(&[9u8; 32]);
+        let mut bytes = B64
+            .decode(encode(&test_claims(), &signer).unwrap())
+            .unwrap();
+        bytes[BLOB_MAGIC.len()] = 99;
+        assert!(matches!(
+            decode_and_verify(&B64.encode(bytes), &signer.verifying_key()),
+            Err(DecodeError::Malformed(m)) if m.contains("version")
+        ));
+    }
+
+    #[test]
+    fn truncated_blob_is_malformed() {
+        let signer = SigningKey::from_bytes(&[9u8; 32]);
+        assert!(matches!(
+            decode_and_verify(&B64.encode(b"OPL"), &signer.verifying_key()),
+            Err(DecodeError::Malformed(_))
+        ));
+    }
+
+    #[test]
+    fn non_base64_is_malformed() {
+        let signer = SigningKey::from_bytes(&[9u8; 32]);
+        assert!(matches!(
+            decode_and_verify("!!! not base64 !!!", &signer.verifying_key()),
+            Err(DecodeError::Malformed(_))
+        ));
+    }
+
+    #[test]
+    fn wrong_signature_length_is_malformed() {
+        let signer = SigningKey::from_bytes(&[9u8; 32]);
+        let mut claims_cbor = Vec::new();
+        ciborium::into_writer(&test_claims(), &mut claims_cbor).unwrap();
+        let b64 = envelope(claims_cbor, vec![0u8; 10]);
+        assert!(matches!(
+            decode_and_verify(&b64, &signer.verifying_key()),
+            Err(DecodeError::Malformed(m)) if m.contains("signature length")
+        ));
+    }
+
+    #[test]
+    fn unknown_claim_field_is_ignored() {
+        // A newer issuer adds a field an older app doesn't know about.
+        #[derive(serde::Serialize)]
+        struct ExtraClaims {
+            v: u8,
+            license_id: String,
+            customer: String,
+            email: String,
+            tier: String,
+            product: String,
+            issued_at: i64,
+            expires_at: Option<i64>,
+            features: Vec<String>,
+            max_orgs: Option<u32>,
+            max_seats: Option<u32>,
+            note: String,
+            #[serde(rename = "x")]
+            extra: u8,
+        }
+        let c = test_claims();
+        let extended = ExtraClaims {
+            v: c.v,
+            license_id: c.license_id.clone(),
+            customer: c.customer.clone(),
+            email: c.email,
+            tier: c.tier,
+            product: c.product,
+            issued_at: c.issued_at,
+            expires_at: c.expires_at,
+            features: c.features,
+            max_orgs: c.max_orgs,
+            max_seats: c.max_seats,
+            note: c.note,
+            extra: 7,
+        };
+
+        let signer = SigningKey::from_bytes(&[9u8; 32]);
+        let mut claims_cbor = Vec::new();
+        ciborium::into_writer(&extended, &mut claims_cbor).unwrap();
+        let signature = signer.sign(&claims_cbor).to_bytes().to_vec();
+        let b64 = envelope(claims_cbor, signature);
+
+        let claims = decode_and_verify(&b64, &signer.verifying_key()).unwrap();
+        assert_eq!(claims.license_id, c.license_id);
+        assert_eq!(claims.customer, c.customer);
+    }
+
+    #[test]
+    fn full_roundtrip_all_fields() {
+        let signer = SigningKey::from_bytes(&[9u8; 32]);
+        let claims = Claims {
+            v: CLAIMS_VERSION,
+            license_id: "lic-9".into(),
+            customer: "Globex".into(),
+            email: "ops@globex.example".into(),
+            tier: "enterprise".into(),
+            product: "globex".into(),
+            issued_at: 1_700_000_000,
+            expires_at: Some(1_900_000_000),
+            features: vec!["sso".into(), "audit".into(), "export".into()],
+            max_orgs: Some(5),
+            max_seats: Some(250),
+            note: "renewal, net-30".into(),
+        };
+        let got =
+            decode_and_verify(&encode(&claims, &signer).unwrap(), &signer.verifying_key()).unwrap();
+        assert_eq!(got.v, claims.v);
+        assert_eq!(got.license_id, claims.license_id);
+        assert_eq!(got.customer, claims.customer);
+        assert_eq!(got.email, claims.email);
+        assert_eq!(got.tier, claims.tier);
+        assert_eq!(got.product, claims.product);
+        assert_eq!(got.issued_at, claims.issued_at);
+        assert_eq!(got.expires_at, claims.expires_at);
+        assert_eq!(got.features, claims.features);
+        assert_eq!(got.max_orgs, claims.max_orgs);
+        assert_eq!(got.max_seats, claims.max_seats);
+        assert_eq!(got.note, claims.note);
+
+        let lifetime = Claims {
+            expires_at: None,
+            ..claims
+        };
+        let got = decode_and_verify(
+            &encode(&lifetime, &signer).unwrap(),
+            &signer.verifying_key(),
+        )
+        .unwrap();
+        assert_eq!(got.expires_at, None);
+        assert_eq!(got.features, lifetime.features);
+    }
 }

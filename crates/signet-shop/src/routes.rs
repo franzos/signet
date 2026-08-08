@@ -495,3 +495,263 @@ async fn webhook(State(state): State<AppState>, headers: HeaderMap, body: String
     }
     StatusCode::OK.into_response()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::{to_bytes, Body};
+    use axum::extract::ConnectInfo;
+    use axum::http::Request;
+    use std::net::SocketAddr;
+    use std::path::PathBuf;
+    use tower::ServiceExt;
+
+    const CATALOG: &str = r#"
+[shop]
+title = "Test Shop"
+
+[[category]]
+id = "acme"
+name = "Acme Corp"
+
+[[sku]]
+id = "acme-annual"
+stripe_price_id = "price_x"
+category = "acme"
+display_name = "Acme Annual"
+amount_cents = 49900
+currency = "eur"
+tier = "business"
+term = "365d"
+
+[[page]]
+slug = "terms"
+title = "Terms"
+"#;
+
+    async fn state_from(toml: &str, content_dir: PathBuf) -> AppState {
+        crate::ensure_crypto_provider();
+        let cfg = crate::config::AppConfig {
+            stripe_api_key: "sk_test_dummy".into(),
+            stripe_webhook_secret: "wh".into(),
+            database_url: "sqlite::memory:".into(),
+            keys_dir: "keys".into(),
+            content_dir,
+            base_url: "http://x".into(),
+            bind_addr: "127.0.0.1:0".into(),
+            trust_proxy: false,
+        };
+        let mut signing = std::collections::HashMap::new();
+        signing.insert(
+            "acme".to_string(),
+            ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]),
+        );
+        AppState {
+            cfg: std::sync::Arc::new(cfg),
+            catalog: std::sync::Arc::new(crate::catalog::parse(toml).unwrap()),
+            stripe: stripe::ClientBuilder::new("sk_test_dummy").build().unwrap(),
+            signing: std::sync::Arc::new(signing),
+            db: crate::db::connect("sqlite::memory:").await.unwrap(),
+            neg_cache: std::sync::Arc::new(crate::cache::NegCache::new(
+                std::time::Duration::from_secs(30),
+                50_000,
+            )),
+            mail: None,
+        }
+    }
+
+    async fn test_state() -> AppState {
+        state_from(CATALOG, PathBuf::from("content")).await
+    }
+
+    /// The peer-IP limiter 500s without a ConnectInfo extension, so the limited
+    /// routes must carry one.
+    fn with_conn(mut req: Request<Body>) -> Request<Body> {
+        req.extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 1234))));
+        req
+    }
+
+    async fn send(state: AppState, req: Request<Body>) -> Response {
+        router(state).oneshot(req).await.unwrap()
+    }
+
+    async fn body_string(resp: Response) -> String {
+        let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        String::from_utf8(bytes.to_vec()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn index_lists_categories() {
+        let state = test_state().await;
+        let resp = send(state, Request::get("/").body(Body::empty()).unwrap()).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(body_string(resp).await.contains("Acme Corp"));
+    }
+
+    #[tokio::test]
+    async fn category_known_and_unknown() {
+        let state = test_state().await;
+        let ok = send(
+            state.clone(),
+            Request::get("/acme").body(Body::empty()).unwrap(),
+        )
+        .await;
+        assert_eq!(ok.status(), StatusCode::OK);
+        let missing = send(state, Request::get("/nope").body(Body::empty()).unwrap()).await;
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn page_not_in_catalog_is_404() {
+        let state = test_state().await;
+        let resp = send(
+            state,
+            Request::get("/p/unknown").body(Body::empty()).unwrap(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn page_without_markdown_is_404() {
+        // "terms" is in the catalog but content_dir has no terms.md.
+        let state = test_state().await;
+        let resp = send(state, Request::get("/p/terms").body(Body::empty()).unwrap()).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn page_with_markdown_renders() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("terms.md"), "# Terms\n\nBody text.").unwrap();
+        let state = state_from(CATALOG, dir.path().to_path_buf()).await;
+        let resp = send(state, Request::get("/p/terms").body(Body::empty()).unwrap()).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(body.contains("<h1>Terms</h1>"));
+        assert!(body.contains("Body text."));
+    }
+
+    #[tokio::test]
+    async fn checkout_unknown_sku_is_400() {
+        let state = test_state().await;
+        let req = with_conn(
+            Request::post("/checkout")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from("sku=nope"))
+                .unwrap(),
+        );
+        let resp = send(state, req).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert!(body_string(resp).await.contains("unknown product"));
+    }
+
+    #[tokio::test]
+    async fn success_rejects_invalid_session_ids() {
+        let over_long = format!("cs_{}", "a".repeat(300));
+        // "nope": no prefix; "cs_bad$id": illegal char; "cs_": too short.
+        for bad in ["nope", "cs_bad$id", "cs_", over_long.as_str()] {
+            let state = test_state().await;
+            let uri = format!("/success?session_id={bad}");
+            let req = with_conn(Request::get(&uri).body(Body::empty()).unwrap());
+            let resp = send(state, req).await;
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "id {bad:?}");
+            assert!(body_string(resp).await.contains("invalid session id"));
+        }
+    }
+
+    #[tokio::test]
+    async fn success_download_rejects_invalid_session_id() {
+        let state = test_state().await;
+        let req = with_conn(
+            Request::get("/success/download?session_id=nope")
+                .body(Body::empty())
+                .unwrap(),
+        );
+        let resp = send(state, req).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn webhook_missing_and_bad_signature() {
+        let state = test_state().await;
+        let missing = send(
+            state.clone(),
+            Request::post("/webhook").body(Body::from("{}")).unwrap(),
+        )
+        .await;
+        assert_eq!(missing.status(), StatusCode::BAD_REQUEST);
+        assert!(body_string(missing).await.contains("missing signature"));
+
+        let bad = send(
+            state,
+            Request::post("/webhook")
+                .header("stripe-signature", "t=1,v1=deadbeef")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+        assert!(body_string(bad).await.contains("bad signature"));
+    }
+
+    #[tokio::test]
+    async fn security_headers_present() {
+        let state = test_state().await;
+        let resp = send(state, Request::get("/").body(Body::empty()).unwrap()).await;
+        let h = resp.headers();
+        assert_eq!(h[header::X_CONTENT_TYPE_OPTIONS], "nosniff");
+        assert_eq!(h[header::REFERRER_POLICY], "no-referrer");
+        let csp = h[header::CONTENT_SECURITY_POLICY].to_str().unwrap();
+        assert!(csp.contains("default-src 'self'"));
+        assert!(csp.contains("form-action 'self' https://checkout.stripe.com"));
+        assert!(csp.contains("frame-ancestors 'none'"));
+    }
+
+    #[tokio::test]
+    async fn csp_reflects_analytics_config() {
+        let with_analytics =
+            format!("{CATALOG}\n[analytics]\nsrc = \"https://plausible.example/js/script.js\"\n");
+        let state = state_from(&with_analytics, PathBuf::from("content")).await;
+        let resp = send(state, Request::get("/").body(Body::empty()).unwrap()).await;
+        let csp = resp.headers()[header::CONTENT_SECURITY_POLICY]
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(csp.contains("script-src 'self' https://plausible.example"));
+        assert!(csp.contains("connect-src 'self' https://plausible.example"));
+
+        let state = test_state().await;
+        let resp = send(state, Request::get("/").body(Body::empty()).unwrap()).await;
+        let csp = resp.headers()[header::CONTENT_SECURITY_POLICY]
+            .to_str()
+            .unwrap();
+        assert!(!csp.contains("plausible"));
+    }
+
+    #[tokio::test]
+    async fn theme_cookie_selects_palette() {
+        let state = test_state().await;
+        let resp = send(
+            state,
+            Request::get("/")
+                .header("cookie", "license_theme=dark")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert!(body_string(resp).await.contains(r#"data-theme="dark""#));
+
+        let state = test_state().await;
+        let resp = send(
+            state,
+            Request::get("/")
+                .header("cookie", "license_theme=bogus")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert!(body_string(resp).await.contains(r#"data-theme="system""#));
+    }
+}

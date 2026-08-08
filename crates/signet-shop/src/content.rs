@@ -36,3 +36,33 @@ pub fn render(content_dir: &Path, slug: &str) -> Option<String> {
 pub fn exists(content_dir: &Path, slug: &str) -> bool {
     safe_slug(slug) && content_dir.join(format!("{slug}.md")).is_file()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn render_rejects_unsafe_slugs() {
+        let dir = tempfile::tempdir().unwrap();
+        for bad in ["../../etc/passwd", "a/b", "Bad", "a.b"] {
+            assert!(
+                render(dir.path(), bad).is_none(),
+                "{bad:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn render_and_exists_for_present_page() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("terms.md"), "# Terms\n\nHello **world**.").unwrap();
+
+        let html = render(dir.path(), "terms").unwrap();
+        assert!(html.contains("<h1>Terms</h1>"));
+        assert!(html.contains("<strong>world</strong>"));
+
+        assert!(exists(dir.path(), "terms"));
+        assert!(!exists(dir.path(), "missing"));
+        assert!(!exists(dir.path(), "../x"));
+    }
+}

@@ -4,7 +4,7 @@ members = ["crates/signetlib", "crates/signet-issuer", "crates/signet-shop"]
 
 [workspace.package]
 edition = "2021"
-version = "0.1.2"
+version = "0.1.3"
 license = "MIT"
 authors = ["Franz Geffke <mail@gofranz.com>"]
 repository = "https://github.com/franzos/signet"
