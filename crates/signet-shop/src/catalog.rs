@@ -4,11 +4,9 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::str::FromStr;
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde::Deserialize;
-use stripe_types::Currency;
 
 /// License term, converted to an `expires_at` at issue time.
 #[derive(Debug, Clone, Copy)]
@@ -38,7 +36,8 @@ pub struct Sku {
     pub url: Option<String>,
     pub price_label: String,
     pub amount_cents: i64,
-    pub currency: Currency,
+    /// Lowercase ISO code.
+    pub currency: String,
     pub tier: String,
     pub features: Vec<String>,
     pub max_orgs: Option<u32>,
@@ -90,6 +89,28 @@ impl Default for ShopConfig {
     }
 }
 
+/// Who computes VAT/sales tax on a sale.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaxMode {
+    /// Charge the catalog amount; tax is the seller's own bookkeeping.
+    #[default]
+    None,
+    /// Stripe Tax computes the rate and handles reverse charge.
+    Stripe,
+}
+
+/// Tax handling plus the seller identity printed on the purchase receipt.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct TaxConfig {
+    pub mode: TaxMode,
+    pub seller_name: Option<String>,
+    pub seller_address: Option<String>,
+    pub seller_vat_id: Option<String>,
+    pub receipt_note: Option<String>,
+}
+
 /// An extra footer link (title + destination), configured per site.
 #[derive(Debug, Clone)]
 pub struct FooterLink {
@@ -117,6 +138,7 @@ pub struct Analytics {
 
 pub struct Catalog {
     pub shop: ShopConfig,
+    pub tax: TaxConfig,
     pub categories: Vec<Category>,
     pub skus: Vec<Sku>,
     pub footer_links: Vec<FooterLink>,
@@ -174,6 +196,8 @@ pub fn load(path: &Path) -> Result<Catalog> {
 struct CatalogFile {
     #[serde(default)]
     shop: ShopConfig,
+    #[serde(default)]
+    tax: TaxConfig,
     #[serde(default)]
     category: Vec<CategoryConfig>,
     #[serde(default)]
@@ -304,16 +328,13 @@ pub fn parse(text: &str) -> Result<Catalog> {
                 sc.category
             );
         }
-        // from_str is infallible: unknown codes become Currency::Unknown, so
-        // validate explicitly rather than trusting the Result.
-        let currency = Currency::from_str(&sc.currency).unwrap();
-        if matches!(currency, Currency::Unknown(_)) {
+        let Some(currency) = stripe_edge::currency_code(&sc.currency) else {
             bail!(
                 "sku {:?}: unknown currency {:?} (use a lowercase ISO code like \"eur\")",
                 sc.id,
                 sc.currency
             );
-        }
+        };
         // A non-positive amount would flow into Stripe's unit_amount and let a
         // paid check pass trivially.
         if sc.amount_cents <= 0 {
@@ -395,8 +416,14 @@ pub fn parse(text: &str) -> Result<Catalog> {
         None => None,
     };
 
+    let tax = file.tax;
+    if tax.mode == TaxMode::Stripe && tax.seller_name.is_none() {
+        bail!("[tax] mode = \"stripe\" requires seller_name (it is printed on the receipt)");
+    }
+
     Ok(Catalog {
         shop: file.shop,
+        tax,
         categories,
         skus,
         footer_links,
@@ -421,9 +448,41 @@ fn parse_term(s: &str) -> Result<Term> {
     Ok(Term::Days(days))
 }
 
+/// Minor units as a decimal amount with its currency, e.g. `EUR 249.00` or `JPY 500`.
+pub fn format_amount(currency: &str, minor: i64) -> String {
+    // Stripe's zero- and three-decimal currencies; everything else has two.
+    let decimals = match currency.to_ascii_lowercase().as_str() {
+        "bif" | "clp" | "djf" | "gnf" | "jpy" | "kmf" | "krw" | "mga" | "pyg" | "rwf" | "ugx"
+        | "vnd" | "vuv" | "xaf" | "xof" | "xpf" => 0,
+        "bhd" | "jod" | "kwd" | "omr" | "tnd" => 3,
+        _ => 2,
+    };
+    if decimals == 0 {
+        return format!("{currency} {minor}");
+    }
+    let scale = 10_i64.pow(decimals);
+    let sign = if minor < 0 { "-" } else { "" };
+    let abs = minor.unsigned_abs();
+    format!(
+        "{currency} {sign}{}.{:0width$}",
+        abs / scale as u64,
+        abs % scale as u64,
+        width = decimals as usize
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn format_amount_respects_currency_decimals() {
+        assert_eq!(format_amount("EUR", 49900), "EUR 499.00");
+        assert_eq!(format_amount("eur", 7967), "eur 79.67");
+        assert_eq!(format_amount("EUR", 5), "EUR 0.05");
+        assert_eq!(format_amount("JPY", 500), "JPY 500");
+        assert_eq!(format_amount("KWD", 1500), "KWD 1.500");
+    }
 
     const SAMPLE: &str = r#"
 [shop]
@@ -460,6 +519,45 @@ term = "lifetime"
 "#;
 
     #[test]
+    fn tax_defaults_to_none_when_the_section_is_absent() {
+        let cat = parse(SAMPLE).unwrap();
+        assert_eq!(cat.tax.mode, TaxMode::None);
+        assert!(cat.tax.seller_name.is_none());
+    }
+
+    #[test]
+    fn tax_stripe_mode_parses_the_seller_identity() {
+        let text = format!(
+            "{SAMPLE}\n[tax]\nmode = \"stripe\"\nseller_name = \"Example Lda\"\n\
+             seller_vat_id = \"PT999999990\"\nreceipt_note = \"Not a fiscal invoice.\"\n"
+        );
+        let cat = parse(&text).unwrap();
+        assert_eq!(cat.tax.mode, TaxMode::Stripe);
+        assert_eq!(cat.tax.seller_name.as_deref(), Some("Example Lda"));
+        assert_eq!(cat.tax.seller_vat_id.as_deref(), Some("PT999999990"));
+        assert_eq!(
+            cat.tax.receipt_note.as_deref(),
+            Some("Not a fiscal invoice.")
+        );
+    }
+
+    #[test]
+    fn tax_stripe_mode_requires_a_seller_name() {
+        let text = format!("{SAMPLE}\n[tax]\nmode = \"stripe\"\n");
+        let err = match parse(&text) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("stripe mode without seller_name must not parse"),
+        };
+        assert!(err.contains("seller_name"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn unknown_tax_mode_is_rejected() {
+        let text = format!("{SAMPLE}\n[tax]\nmode = \"paddle\"\n");
+        assert!(parse(&text).is_err());
+    }
+
+    #[test]
     fn parses_and_converts() {
         let cat = parse(SAMPLE).unwrap();
         assert_eq!(cat.shop.title, "Test Shop");
@@ -475,7 +573,7 @@ term = "lifetime"
         assert_eq!(acme.url.as_deref(), Some("https://acme.example"));
 
         let annual = cat.by_id("acme-annual").unwrap();
-        assert_eq!(annual.currency, Currency::EUR);
+        assert_eq!(annual.currency, "eur");
         assert_eq!(annual.description.as_deref(), Some("Annual plan"));
         let p = annual.to_issue_params("Acme".into(), "a@b.c".into(), 1_000_000, "web".into());
         assert_eq!(p.product, "acme");

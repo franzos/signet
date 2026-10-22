@@ -15,6 +15,8 @@ use anyhow::{anyhow, bail, Context, Result};
 use polymail::{Address, Body, Email, Mailer, ProviderConfig};
 use serde::Deserialize;
 
+use crate::catalog::format_amount;
+
 /// App-level email settings: sender identity and operator recipient on top of
 /// polymail's flattened provider schema. No `derive(Debug)`: `ProviderConfig`'s
 /// own `Debug` prints credentials verbatim, so this struct must never be logged.
@@ -120,8 +122,7 @@ fn apply_env(table: &mut toml::Table, get: &dyn Fn(&str) -> Option<String>) -> R
     Ok(())
 }
 
-/// Everything a purchase notification needs, owned so it can outlive the request
-/// on a background task.
+/// Everything a purchase notification needs.
 pub struct PurchaseNotice {
     pub buyer_email: String,
     pub customer: String,
@@ -130,6 +131,80 @@ pub struct PurchaseNotice {
     pub license_blob: String,
     pub expires_at: Option<i64>,
     pub price_label: String,
+    pub receipt: Option<Receipt>,
+}
+
+/// A payment receipt, deliberately not a fiscal invoice (those need certified software in e.g. Portugal).
+pub struct Receipt {
+    pub seller_name: String,
+    pub seller_address: Option<String>,
+    pub seller_vat_id: Option<String>,
+    pub note: Option<String>,
+    pub currency: String,
+    pub amount_total: i64,
+    pub amount_subtotal: Option<i64>,
+    pub amount_tax: Option<i64>,
+    pub country: Option<String>,
+    pub buyer_vat_id: Option<String>,
+    pub exemption: Option<String>,
+}
+
+impl Receipt {
+    /// `None` without a seller identity, or for a sale recorded before the tax columns.
+    pub fn build(cfg: &crate::catalog::TaxConfig, rec: &crate::db::StoredLicense) -> Option<Self> {
+        let seller_name = cfg.seller_name.clone()?;
+        let amount_total = rec.amount_total?;
+        Some(Self {
+            seller_name,
+            seller_address: cfg.seller_address.clone(),
+            seller_vat_id: cfg.seller_vat_id.clone(),
+            note: cfg.receipt_note.clone(),
+            currency: rec.currency.clone().unwrap_or_default().to_uppercase(),
+            amount_total,
+            amount_subtotal: rec.amount_subtotal,
+            amount_tax: rec.amount_tax,
+            country: rec.country.clone(),
+            buyer_vat_id: rec.vat_id.clone(),
+            exemption: rec.tax_exemption.clone(),
+        })
+    }
+
+    /// The plain-text block appended to the buyer's license email.
+    fn render(&self) -> String {
+        let mut out = String::from("\n--- Payment receipt ---\n\n");
+        out.push_str(&format!("Seller: {}\n", self.seller_name));
+        if let Some(a) = &self.seller_address {
+            out.push_str(&format!("        {a}\n"));
+        }
+        if let Some(v) = &self.seller_vat_id {
+            out.push_str(&format!("VAT ID: {v}\n"));
+        }
+        out.push('\n');
+        // No split under `mode = "none"`: nothing computed one.
+        if let (Some(net), Some(tax)) = (self.amount_subtotal, self.amount_tax) {
+            out.push_str(&format!("Net:    {}\n", format_amount(&self.currency, net)));
+            out.push_str(&format!("VAT:    {}\n", format_amount(&self.currency, tax)));
+        }
+        out.push_str(&format!(
+            "Total:  {}\n",
+            format_amount(&self.currency, self.amount_total)
+        ));
+        if let Some(c) = &self.country {
+            out.push_str(&format!("Country: {c}\n"));
+        }
+        if let Some(v) = &self.buyer_vat_id {
+            out.push_str(&format!("Your VAT ID: {v}\n"));
+        }
+        if self.exemption.as_deref() == Some("reverse") {
+            out.push_str("\nVAT reverse charge: VAT is accounted for by the recipient.\n");
+        } else if self.exemption.as_deref() == Some("exempt") {
+            out.push_str("\nExempt from VAT.\n");
+        }
+        if let Some(n) = &self.note {
+            out.push_str(&format!("\n{n}\n"));
+        }
+        out
+    }
 }
 
 /// A constructed mailer plus the addresses it sends from/to.
@@ -171,60 +246,17 @@ impl MailService {
         })
     }
 
-    /// Send both notifications, logging (never propagating) any failure so a mail
-    /// outage can never block or reverse license delivery. Each send gets one
-    /// bounded retry to ride out a transient transport blip.
-    pub async fn notify_purchase(&self, n: &PurchaseNotice) {
-        if n.buyer_email.is_empty() {
-            tracing::warn!("purchase has no buyer email; skipping license email");
-        } else {
-            match self.build_license_email(n) {
-                Ok(email) => {
-                    if let Err(e) = self.send_with_retry(&email).await {
-                        tracing::error!(
-                            license_id = %n.license_id,
-                            buyer = %n.buyer_email,
-                            "purchase email failed permanently (license email): {e}"
-                        );
-                    }
-                }
-                Err(e) => tracing::error!(
-                    license_id = %n.license_id,
-                    buyer = %n.buyer_email,
-                    "failed to build license email: {e}"
-                ),
-            }
-        }
-
-        if let Some(operator) = &self.operator {
-            match self.build_operator_email(operator, n) {
-                Ok(email) => {
-                    if let Err(e) = self.send_with_retry(&email).await {
-                        tracing::error!(
-                            license_id = %n.license_id,
-                            "purchase email failed permanently (operator notice): {e}"
-                        );
-                    }
-                }
-                Err(e) => tracing::error!("failed to build operator notice: {e}"),
-            }
-        }
-    }
-
-    /// One retry after a short pause; a longer queue is not worth the moving
-    /// parts here, the permanent-failure log line is the operator's signal.
-    async fn send_with_retry(&self, email: &Email) -> Result<(), polymail::SendError> {
-        const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(5);
-        let Err(first) = self.mailer.send(email).await else {
-            return Ok(());
-        };
-        tracing::warn!("email send failed, retrying once in {RETRY_DELAY:?}: {first}");
-        tokio::time::sleep(RETRY_DELAY).await;
+    pub(crate) async fn send(&self, email: &Email) -> Result<(), polymail::SendError> {
         self.mailer.send(email).await.map(|_| ())
     }
 
-    fn build_license_email(&self, n: &PurchaseNotice) -> Result<Email> {
-        let body = format!(
+    /// Recipient of sale and hold notices; `None` disables both.
+    pub(crate) fn operator_address(&self) -> Option<&Address> {
+        self.operator.as_ref()
+    }
+
+    pub(crate) fn build_license_email(&self, n: &PurchaseNotice) -> Result<Email> {
+        let mut body = format!(
             "Hi,\n\n\
              thank you for your purchase. Your {product} license is below.\n\n\
              License key:\n{blob}\n\n\
@@ -236,6 +268,9 @@ impl MailService {
             id = n.license_id,
             expiry = format_expiry(n.expires_at),
         );
+        if let Some(receipt) = &n.receipt {
+            body.push_str(&receipt.render());
+        }
         let to = to_address(
             n.buyer_email.clone(),
             (!n.customer.is_empty()).then(|| n.customer.clone()),
@@ -250,13 +285,17 @@ impl MailService {
         .map_err(|e| anyhow!("{e}"))
     }
 
-    fn build_operator_email(&self, operator: &Address, n: &PurchaseNotice) -> Result<Email> {
+    pub(crate) fn build_operator_email(
+        &self,
+        operator: &Address,
+        n: &PurchaseNotice,
+    ) -> Result<Email> {
         let buyer = if n.buyer_email.is_empty() {
             "(none)"
         } else {
             &n.buyer_email
         };
-        let body = format!(
+        let mut body = format!(
             "A new license was sold.\n\n\
              Product:     {product}\n\
              Customer:    {customer}\n\
@@ -271,6 +310,32 @@ impl MailService {
             id = n.license_id,
             expiry = format_expiry(n.expires_at),
         );
+        // This notice is what reaches the bookkeeper, so it carries the VAT facts too.
+        if let Some(r) = &n.receipt {
+            if let (Some(net), Some(tax)) = (r.amount_subtotal, r.amount_tax) {
+                body.push_str(&format!(
+                    "Net:         {}\n",
+                    format_amount(&r.currency, net)
+                ));
+                body.push_str(&format!(
+                    "VAT:         {}\n",
+                    format_amount(&r.currency, tax)
+                ));
+            }
+            body.push_str(&format!(
+                "Total:       {}\n",
+                format_amount(&r.currency, r.amount_total)
+            ));
+            if let Some(c) = &r.country {
+                body.push_str(&format!("Country:     {c}\n"));
+            }
+            if let Some(v) = &r.buyer_vat_id {
+                body.push_str(&format!("Buyer VAT:   {v}\n"));
+            }
+            if let Some(e) = &r.exemption {
+                body.push_str(&format!("Tax status:  {e}\n"));
+            }
+        }
         Email::builder(
             self.from.clone(),
             format!("New license sold: {}", n.product_display),
@@ -279,6 +344,43 @@ impl MailService {
         .to(operator.clone())
         .build()
         .map_err(|e| anyhow!("{e}"))
+    }
+
+    pub(crate) fn build_hold_email(
+        &self,
+        operator: &Address,
+        session_id: &str,
+        reason: &str,
+    ) -> Result<Email> {
+        let body = match session_id.strip_prefix("charge:") {
+            Some(charge_id) => format!(
+                "A refund or dispute could not be matched to a sale.\n\n\
+                 Charge: {charge_id}\n\
+                 Reason: {reason}\n\n\
+                 Find the charge in Stripe, check for a license, and close the hold with \
+                 `signet-shop release charge:{charge_id}`.\n"
+            ),
+            None => format!(
+                "A paid checkout session was held and no license was issued.\n\n\
+                 Session: {session_id}\n\
+                 Reason:  {reason}\n\n\
+                 The buyer sees a page saying the payment is being checked. Verify the \
+                 payment in Stripe before releasing the session.\n"
+            ),
+        };
+        Email::builder(self.from.clone(), "Sale held for review", Body::Text(body))
+            .to(operator.clone())
+            .build()
+            .map_err(|e| anyhow!("{e}"))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_service(mailer: Box<dyn Mailer>) -> Self {
+        Self {
+            mailer,
+            from: Address::with_name("shop@example.com", "Example Shop"),
+            operator: Some(Address::new("ops@example.com")),
+        }
     }
 }
 
@@ -315,15 +417,28 @@ mod tests {
             license_blob: "SIGNET.blob.here".into(),
             expires_at: Some(1_700_000_000),
             price_label: "EUR 499 / year".into(),
+            receipt: None,
+        }
+    }
+
+    fn receipt() -> Receipt {
+        Receipt {
+            seller_name: "Example Lda".into(),
+            seller_address: Some("Rua Example 1, Lisboa".into()),
+            seller_vat_id: Some("PT999999990".into()),
+            note: Some("This is a payment receipt, not a fiscal invoice.".into()),
+            currency: "EUR".into(),
+            amount_total: 49900,
+            amount_subtotal: Some(41933),
+            amount_tax: Some(7967),
+            country: Some("DE".into()),
+            buyer_vat_id: None,
+            exemption: None,
         }
     }
 
     fn service() -> MailService {
-        MailService {
-            mailer: Box::new(LettermintMailer::new("test-token")),
-            from: Address::with_name("shop@example.com", "Example Shop"),
-            operator: Some(Address::new("ops@example.com")),
-        }
+        MailService::test_service(Box::new(LettermintMailer::new("test-token")))
     }
 
     /// A getter over a fixed map, standing in for the environment.
@@ -446,7 +561,6 @@ mod tests {
     // runtime handle at build time (as it does under `serve`'s runtime).
     #[tokio::test]
     async fn from_config_builds_smtp_and_lettermint() {
-        crate::ensure_crypto_provider();
         let smtp = EmailConfig {
             enabled: true,
             from_address: Some("shop@example.com".into()),
@@ -504,6 +618,105 @@ mod tests {
             _ => panic!("expected plain text body"),
         };
         assert!(text.contains("Lifetime (no expiry)"));
+    }
+
+    #[test]
+    fn license_email_carries_the_receipt_when_configured() {
+        let svc = service();
+        let mut n = notice();
+        n.receipt = Some(receipt());
+        let text = match &svc.build_license_email(&n).unwrap().body {
+            Body::Text(t) => t.clone(),
+            _ => panic!("expected plain text body"),
+        };
+        assert!(text.contains("Example Lda"));
+        assert!(text.contains("PT999999990"));
+        assert!(text.contains("Net:    EUR 419.33"));
+        assert!(text.contains("VAT:    EUR 79.67"));
+        assert!(text.contains("Total:  EUR 499.00"));
+        assert!(text.contains("not a fiscal invoice"));
+        assert!(text.contains("SIGNET.blob.here"));
+    }
+
+    #[test]
+    fn reverse_charge_receipt_states_the_mechanism() {
+        let svc = service();
+        let mut n = notice();
+        let mut r = receipt();
+        r.amount_subtotal = Some(49900);
+        r.amount_tax = Some(0);
+        r.buyer_vat_id = Some("DE811907980".into());
+        r.exemption = Some("reverse".into());
+        n.receipt = Some(r);
+        let text = match &svc.build_license_email(&n).unwrap().body {
+            Body::Text(t) => t.clone(),
+            _ => panic!("expected plain text body"),
+        };
+        assert!(text.contains("VAT is accounted for by the recipient"));
+        assert!(text.contains("DE811907980"));
+        assert!(text.contains("VAT:    EUR 0.00"));
+    }
+
+    /// Without a computed split, "VAT: 0.00" would be untrue.
+    #[test]
+    fn receipt_without_a_split_shows_only_the_total() {
+        let mut r = receipt();
+        r.amount_subtotal = None;
+        r.amount_tax = None;
+        let text = r.render();
+        assert!(text.contains("Total:  EUR 499.00"));
+        assert!(!text.contains("VAT:"));
+        assert!(!text.contains("Net:"));
+    }
+
+    #[test]
+    fn operator_notice_carries_the_vat_lines() {
+        let svc = service();
+        let mut n = notice();
+        n.receipt = Some(receipt());
+        let text = match &svc
+            .build_operator_email(svc.operator.as_ref().unwrap(), &n)
+            .unwrap()
+            .body
+        {
+            Body::Text(t) => t.clone(),
+            _ => panic!("expected plain text body"),
+        };
+        assert!(text.contains("Net:         EUR 419.33"));
+        assert!(text.contains("VAT:         EUR 79.67"));
+        assert!(text.contains("Country:     DE"));
+    }
+
+    #[test]
+    fn hold_email_carries_session_and_reason() {
+        let svc = service();
+        let email = svc
+            .build_hold_email(svc.operator_address().unwrap(), "cs_held", "missing_sku")
+            .unwrap();
+        assert_eq!(email.to[0].email, "ops@example.com");
+        let Body::Text(text) = &email.body else {
+            panic!("expected plain text body");
+        };
+        assert!(text.contains("Session: cs_held"));
+        assert!(text.contains("Reason:  missing_sku"));
+    }
+
+    #[test]
+    fn charge_hold_email_names_the_charge() {
+        let svc = service();
+        let email = svc
+            .build_hold_email(
+                svc.operator_address().unwrap(),
+                "charge:ch_123",
+                "lookup_failed:permanent",
+            )
+            .unwrap();
+        let Body::Text(text) = &email.body else {
+            panic!("expected plain text body");
+        };
+        assert!(text.contains("Charge: ch_123"), "{text}");
+        assert!(text.contains("release charge:ch_123"), "{text}");
+        assert!(!text.contains("checkout session"), "{text}");
     }
 
     #[test]

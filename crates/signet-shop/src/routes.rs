@@ -4,11 +4,11 @@ use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::{Form, Router};
 use serde::Deserialize;
-use stripe_webhook::{EventObject, Webhook};
+use stripe_edge::{CheckoutSpec, CustomField, Line, Mode};
 
 use crate::render::page;
 use crate::state::AppState;
-use crate::{catalog, fulfill, payments};
+use crate::{catalog, events, fulfill};
 
 pub fn router(state: AppState) -> Router {
     use axum::extract::DefaultBodyLimit;
@@ -335,16 +335,24 @@ async fn checkout(State(state): State<AppState>, Form(form): Form<CheckoutForm>)
         "{}/success?session_id={{CHECKOUT_SESSION_ID}}",
         state.cfg.base_url
     );
-    let cancel_url = format!("{}/", state.cfg.base_url);
-    match payments::create_checkout_session(
-        &state.stripe,
-        &sku.stripe_price_id,
-        &sku.id,
-        &success_url,
-        &cancel_url,
-    )
-    .await
-    {
+    let spec = CheckoutSpec {
+        mode: Mode::Payment,
+        line: Line::Price(sku.stripe_price_id.clone()),
+        success_url,
+        cancel_url: format!("{}/", state.cfg.base_url),
+        client_reference_id: None,
+        metadata: [("sku".to_string(), sku.id.clone())].into(),
+        customer: None,
+        customer_email: None,
+        collect_tax: state.catalog.tax.mode == catalog::TaxMode::Stripe,
+        // Stripe collects the email; the company becomes the license `customer`.
+        custom_fields: vec![CustomField {
+            key: "company".into(),
+            label: "Company name".into(),
+        }],
+    };
+    let idem_key = format!("checkout:{}", uuid::Uuid::new_v4());
+    match state.stripe.create_checkout(spec, &idem_key).await {
         Ok(session) => match session.url {
             Some(url) => Redirect::to(&url).into_response(),
             None => (StatusCode::BAD_GATEWAY, "stripe returned no url").into_response(),
@@ -365,6 +373,7 @@ struct SuccessQuery {
 #[template(path = "success.html")]
 struct SuccessTemplate {
     pending: bool,
+    held: bool,
     session_id: String,
     blob: String,
     product: String,
@@ -391,6 +400,7 @@ async fn success(
     match fulfill::fulfill(&state, &q.session_id).await {
         Ok(fulfill::FulfillOutcome::Ready(lic)) => page(&SuccessTemplate {
             pending: false,
+            held: false,
             session_id: q.session_id,
             blob: lic.blob,
             product: lic.product,
@@ -398,6 +408,15 @@ async fn success(
         }),
         Ok(fulfill::FulfillOutcome::Pending) => page(&SuccessTemplate {
             pending: true,
+            held: false,
+            session_id: q.session_id,
+            blob: String::new(),
+            product: String::new(),
+            chrome: ch,
+        }),
+        Ok(fulfill::FulfillOutcome::Held) => page(&SuccessTemplate {
+            pending: false,
+            held: true,
             session_id: q.session_id,
             blob: String::new(),
             product: String::new(),
@@ -449,10 +468,12 @@ async fn success_download(
             )
                 .into_response()
         }
-        // Not paid yet or unknown: the status page explains either case.
-        Ok(fulfill::FulfillOutcome::Pending | fulfill::FulfillOutcome::LookupFailed) => {
-            Redirect::to(&format!("/success?session_id={}", q.session_id)).into_response()
-        }
+        // Not paid yet, held or unknown: the status page explains each case.
+        Ok(
+            fulfill::FulfillOutcome::Pending
+            | fulfill::FulfillOutcome::Held
+            | fulfill::FulfillOutcome::LookupFailed,
+        ) => Redirect::to(&format!("/success?session_id={}", q.session_id)).into_response(),
         Err(e) => {
             // Never log q.session_id: it is the bearer secret for this endpoint.
             tracing::error!("license download failed: {e:#}");
@@ -461,10 +482,8 @@ async fn success_download(
     }
 }
 
-/// Stripe webhook. `stripe_webhook::Webhook::construct_event` verifies the
-/// signature over the raw body (replacing our hand-rolled HMAC). We fulfill on
-/// both the instant `completed` and the delayed `async_payment_succeeded`
-/// events; dynamic payment methods can enable async rails from the Dashboard.
+/// Stripe webhook. Only a bad signature is a 400 and only a retryable failure a
+/// 500, since Stripe retries every non-2xx for days.
 async fn webhook(State(state): State<AppState>, headers: HeaderMap, body: String) -> Response {
     let Some(sig) = headers
         .get("stripe-signature")
@@ -472,26 +491,24 @@ async fn webhook(State(state): State<AppState>, headers: HeaderMap, body: String
     else {
         return (StatusCode::BAD_REQUEST, "missing signature").into_response();
     };
-    let event = match Webhook::construct_event(&body, sig, &state.cfg.stripe_webhook_secret) {
+    let event = match state
+        .stripe
+        .parse_webhook(&body, sig, &state.cfg.stripe_webhook_secret)
+    {
         Ok(e) => e,
-        Err(e) => {
-            tracing::warn!("webhook signature/parse rejected: {e:?}");
+        Err(stripe_edge::Error::Signature) => {
+            tracing::warn!("webhook signature rejected");
             return (StatusCode::BAD_REQUEST, "bad signature").into_response();
         }
-    };
-
-    let session = match event.data.object {
-        EventObject::CheckoutSessionCompleted(s)
-        | EventObject::CheckoutSessionAsyncPaymentSucceeded(s) => Some(s),
-        _ => None,
-    };
-    if let Some(s) = session {
-        let info = payments::SessionInfo::from_session(&s);
-        if let Err(e) = fulfill::fulfill_paid_session(&state, &info).await {
-            tracing::error!("webhook fulfill failed: {e:#}");
-            // Non-2xx so Stripe retries the delivery.
-            return (StatusCode::INTERNAL_SERVER_ERROR, "fulfill error").into_response();
+        Err(e) => {
+            tracing::error!("webhook event not processed: {e}");
+            return StatusCode::OK.into_response();
         }
+    };
+    let event_id = event.event_id().to_owned();
+    if let Err(e) = events::handle(&state, event).await {
+        tracing::error!(%event_id, "webhook event failed: {e:#}");
+        return (StatusCode::INTERNAL_SERVER_ERROR, "event error").into_response();
     }
     StatusCode::OK.into_response()
 }
@@ -530,7 +547,6 @@ title = "Terms"
 "#;
 
     async fn state_from(toml: &str, content_dir: PathBuf) -> AppState {
-        crate::ensure_crypto_provider();
         let cfg = crate::config::AppConfig {
             stripe_api_key: "sk_test_dummy".into(),
             stripe_webhook_secret: "wh".into(),
@@ -549,14 +565,11 @@ title = "Terms"
         AppState {
             cfg: std::sync::Arc::new(cfg),
             catalog: std::sync::Arc::new(crate::catalog::parse(toml).unwrap()),
-            stripe: stripe::ClientBuilder::new("sk_test_dummy").build().unwrap(),
+            stripe: stripe_edge::Stripe::offline("signet", false),
             signing: std::sync::Arc::new(signing),
             db: crate::db::connect("sqlite::memory:").await.unwrap(),
-            neg_cache: std::sync::Arc::new(crate::cache::NegCache::new(
-                std::time::Duration::from_secs(30),
-                50_000,
-            )),
             mail: None,
+            lookups: crate::fulfill::tests::stub_lookups(),
         }
     }
 
@@ -694,6 +707,376 @@ title = "Terms"
         .await;
         assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
         assert!(body_string(bad).await.contains("bad signature"));
+    }
+
+    /// A `checkout.session.completed` webhook for `session`, which the stub lookup also returns.
+    fn completed_webhook(session: &stripe_edge::SessionInfo) -> Request<Body> {
+        crate::fulfill::tests::stub_session(session);
+        signed_webhook(stripe_edge::test_util::session_completed_json(session))
+    }
+
+    fn signed_webhook(payload: String) -> Request<Body> {
+        let sig = stripe_edge::test_util::sign(&payload, "wh", chrono::Utc::now().timestamp());
+        Request::post("/webhook")
+            .header("stripe-signature", sig)
+            .body(Body::from(payload))
+            .unwrap()
+    }
+
+    async fn count(state: &AppState, table: &str) -> i64 {
+        sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}"))
+            .fetch_one(&state.db)
+            .await
+            .unwrap()
+    }
+
+    async fn outbox_kinds(state: &AppState) -> Vec<String> {
+        sqlx::query_scalar("SELECT kind FROM mail_outbox ORDER BY id")
+            .fetch_all(&state.db)
+            .await
+            .unwrap()
+    }
+
+    fn mailed(state: AppState) -> AppState {
+        crate::outbox::tests::with_mail(state, &crate::outbox::tests::TestMailer::default())
+    }
+
+    #[tokio::test]
+    async fn webhook_completed_session_mints_once() {
+        let state = mailed(test_state().await);
+        let mut session = crate::fulfill::tests::paid_session("cs_test_wh", "acme-annual");
+        session.payment_intent_id = Some("pi_clean".into());
+        let resp = send(state.clone(), completed_webhook(&session)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let stored = crate::db::get_by_session(&state.db, "cs_test_wh")
+            .await
+            .unwrap()
+            .expect("license stored");
+        assert_eq!(stored.customer, "Acme GmbH");
+        assert_eq!(stored.sku, "acme-annual");
+
+        let resp = send(state.clone(), completed_webhook(&session)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(count(&state, "licenses").await, 1);
+        let again = crate::db::get_by_session(&state.db, "cs_test_wh")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(again.blob, stored.blob);
+        assert_eq!(count(&state, "holds").await, 0);
+        assert_eq!(outbox_kinds(&state).await, ["license", "sale_notice"]);
+    }
+
+    /// The webhook and the success page fulfil the same session at once on a file DB.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn webhook_and_success_race_mint_one_licence_and_two_mails() {
+        let dir = tempfile::tempdir().unwrap();
+        let url = format!("sqlite://{}", dir.path().join("shop.db").display());
+        let mut state = mailed(test_state().await);
+        state.db = crate::db::connect(&url).await.unwrap();
+        for i in 0..8 {
+            let id = format!("cs_test_race_{i}");
+            let session = crate::fulfill::tests::paid_session(&id, "acme-annual");
+            let hook = tokio::spawn(send(state.clone(), completed_webhook(&session)));
+            let st = state.clone();
+            let page =
+                tokio::spawn(
+                    async move { crate::fulfill::fulfill_paid_session(&st, &session).await },
+                );
+            assert_eq!(hook.await.unwrap().status(), StatusCode::OK);
+            let crate::fulfill::FulfillOutcome::Ready(direct) = page.await.unwrap().unwrap() else {
+                panic!("expected Ready");
+            };
+            let stored = crate::db::get_by_session(&state.db, &id)
+                .await
+                .unwrap()
+                .expect("license stored");
+            assert_eq!(direct.blob, stored.blob);
+            let kinds: Vec<String> = sqlx::query_scalar(
+                "SELECT kind FROM mail_outbox WHERE json_extract(payload, '$.session_id') = ?
+                 ORDER BY id",
+            )
+            .bind(&id)
+            .fetch_all(&state.db)
+            .await
+            .unwrap();
+            assert_eq!(kinds, ["license", "sale_notice"]);
+        }
+        assert_eq!(count(&state, "licenses").await, 8);
+        assert_eq!(count(&state, "mail_outbox").await, 16);
+    }
+
+    #[tokio::test]
+    async fn webhook_missing_sku_is_held_and_acknowledged() {
+        let state = mailed(test_state().await);
+        let mut session = crate::fulfill::tests::paid_session("cs_test_nosku", "acme-annual");
+        session.metadata.clear();
+        for _ in 0..2 {
+            let resp = send(state.clone(), completed_webhook(&session)).await;
+            assert_eq!(resp.status(), StatusCode::OK);
+        }
+        assert_eq!(count(&state, "licenses").await, 0);
+        assert_eq!(count(&state, "holds").await, 1);
+        let hold = crate::db::open_hold(&state.db, "cs_test_nosku")
+            .await
+            .unwrap()
+            .expect("hold");
+        assert_eq!(hold.reason, "missing_sku");
+        assert_eq!(outbox_kinds(&state).await, ["hold_notice"]);
+
+        // Signed but not a Stripe event.
+        let resp = send(state, signed_webhook("{}".into())).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn webhook_other_mode_event_is_ignored_both_ways() {
+        for account_live in [false, true] {
+            let mut state = test_state().await;
+            state.stripe = stripe_edge::Stripe::offline("signet", account_live);
+            let mut session = crate::fulfill::tests::paid_session("cs_test_mode", "acme-annual");
+            session.livemode = !account_live;
+            let payload = stripe_edge::test_util::session_completed_json(&session);
+            let resp = send(state.clone(), signed_webhook(payload)).await;
+            assert_eq!(resp.status(), StatusCode::OK);
+            assert_eq!(count(&state, "licenses").await, 0);
+            assert_eq!(count(&state, "holds").await, 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn success_shows_held_and_download_redirects() {
+        let state = test_state().await;
+        crate::db::insert_hold(&state.db, "cs_test_held", "missing_sku", None)
+            .await
+            .unwrap();
+        let req = with_conn(
+            Request::get("/success?session_id=cs_test_held")
+                .body(Body::empty())
+                .unwrap(),
+        );
+        let resp = send(state.clone(), req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(body.contains("being checked"), "{body}");
+        assert!(!body.contains("still processing"));
+
+        let req = with_conn(
+            Request::get("/success/download?session_id=cs_test_held")
+                .body(Body::empty())
+                .unwrap(),
+        );
+        let resp = send(state, req).await;
+        assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            resp.headers()[header::LOCATION],
+            "/success?session_id=cs_test_held"
+        );
+    }
+
+    #[tokio::test]
+    async fn held_sale_is_released_by_the_operator() {
+        let state = mailed(test_state().await);
+        let mut session = crate::fulfill::tests::paid_session("cs_test_release", "acme-annual");
+        session.amount_total = Some(100);
+        let resp = send(state.clone(), completed_webhook(&session)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let hold = crate::db::open_hold(&state.db, "cs_test_release")
+            .await
+            .unwrap()
+            .expect("hold");
+        assert_eq!(hold.reason, "mismatch:amount 100 is below 49900");
+
+        // A session lookup would now find nothing, so the held page proves none was made.
+        crate::fulfill::tests::forget_session(&session.id);
+        let page = || {
+            with_conn(
+                Request::get("/success?session_id=cs_test_release")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+        };
+        let body = body_string(send(state.clone(), page()).await).await;
+        assert!(body.contains("being checked"), "{body}");
+
+        let rec = crate::cli::release_paid(&state, &session).await.unwrap();
+        assert!(crate::db::open_hold(&state.db, "cs_test_release")
+            .await
+            .unwrap()
+            .is_none());
+        let stored = crate::db::get_by_session(&state.db, "cs_test_release")
+            .await
+            .unwrap()
+            .expect("licence");
+        assert_eq!(stored.blob, rec.blob);
+        assert_eq!(stored.amount_total, Some(100));
+
+        let resp = send(state.clone(), page()).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(
+            body.contains("Thank you") && body.contains(&rec.blob),
+            "{body}"
+        );
+
+        let err = crate::cli::release_paid(&state, &session)
+            .await
+            .unwrap_err();
+        assert_eq!(err.to_string(), "no open hold for cs_test_release");
+        assert_eq!(count(&state, "licenses").await, 1);
+        assert_eq!(
+            outbox_kinds(&state).await,
+            ["hold_notice", "license", "sale_notice"]
+        );
+    }
+
+    #[tokio::test]
+    async fn webhook_store_failure_is_retried() {
+        let state = test_state().await;
+        state.db.close().await;
+        let session = crate::fulfill::tests::paid_session("cs_test_db", "acme-annual");
+        let resp = send(state, completed_webhook(&session)).await;
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn webhook_mints_from_the_fetched_session_not_the_payload() {
+        let state = mailed(test_state().await);
+        let mut fetched = crate::fulfill::tests::paid_session("cs_test_unpaid", "acme-annual");
+        fetched.paid = false;
+        crate::fulfill::tests::stub_session(&fetched);
+        let mut payload = fetched.clone();
+        payload.paid = true;
+        let json = stripe_edge::test_util::session_completed_json(&payload);
+        let resp = send(state.clone(), signed_webhook(json)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(count(&state, "licenses").await, 0);
+        assert_eq!(count(&state, "holds").await, 0);
+    }
+
+    #[tokio::test]
+    async fn webhook_holds_a_reversed_or_unreadable_payment() {
+        for (id, pi, reason, kinds) in [
+            (
+                "cs_test_refunded",
+                "pi_refunded",
+                "refund:ch_refunded",
+                &[][..],
+            ),
+            (
+                "cs_test_disputed",
+                "pi_disputed",
+                "dispute:charge:ch_disputed",
+                &[],
+            ),
+            (
+                "cs_test_lookup",
+                "pi_permanent",
+                "lookup_failed",
+                &["hold_notice"],
+            ),
+            (
+                "cs_test_nocharge",
+                "pi_missing",
+                "lookup_failed",
+                &["hold_notice"],
+            ),
+        ] {
+            let state = mailed(test_state().await);
+            let mut session = crate::fulfill::tests::paid_session(id, "acme-annual");
+            session.payment_intent_id = Some(pi.into());
+            let resp = send(state.clone(), completed_webhook(&session)).await;
+            assert_eq!(resp.status(), StatusCode::OK);
+            assert_eq!(count(&state, "licenses").await, 0);
+            let hold = crate::db::open_hold(&state.db, id)
+                .await
+                .unwrap()
+                .expect("hold");
+            assert_eq!(hold.reason, reason);
+            assert_eq!(outbox_kinds(&state).await, kinds);
+        }
+    }
+
+    #[tokio::test]
+    async fn dispute_with_an_unreadable_charge_is_held_and_acknowledged() {
+        let state = mailed(test_state().await);
+        let payload = include_str!("../tests/fixtures/dispute_created.json");
+        let resp = send(state.clone(), signed_webhook(payload.into())).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let hold = crate::db::open_hold(&state.db, "charge:ch_3USz0qBXbQNWZa4n0lqqKPUG")
+            .await
+            .unwrap()
+            .expect("hold");
+        assert_eq!(hold.reason, "lookup_failed:permanent");
+        assert_eq!(outbox_kinds(&state).await, ["hold_notice"]);
+    }
+
+    #[tokio::test]
+    async fn webhook_holds_a_session_stripe_cannot_return() {
+        // Unregistered in the stub: not found; `cs_test_permanent`: a permanent error.
+        for id in ["cs_test_vanished", "cs_test_permanent"] {
+            let state = mailed(test_state().await);
+            let session = crate::fulfill::tests::paid_session(id, "acme-annual");
+            let json = stripe_edge::test_util::session_completed_json(&session);
+            let resp = send(state.clone(), signed_webhook(json)).await;
+            assert_eq!(resp.status(), StatusCode::OK, "{id}");
+            assert_eq!(count(&state, "licenses").await, 0);
+            let hold = crate::db::open_hold(&state.db, id)
+                .await
+                .unwrap()
+                .expect("hold");
+            assert_eq!(hold.reason, "lookup_failed:session");
+            assert_eq!(outbox_kinds(&state).await, ["hold_notice"]);
+        }
+    }
+
+    #[tokio::test]
+    async fn webhook_transient_charge_lookup_is_retried_and_writes_nothing() {
+        let state = mailed(test_state().await);
+        let mut session = crate::fulfill::tests::paid_session("cs_test_transient", "acme-annual");
+        session.payment_intent_id = Some("pi_transient".into());
+        let resp = send(state.clone(), completed_webhook(&session)).await;
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        for table in ["licenses", "holds", "mail_outbox"] {
+            assert_eq!(count(&state, table).await, 0, "{table}");
+        }
+    }
+
+    #[tokio::test]
+    async fn success_for_a_disputed_payment_shows_the_held_page() {
+        let state = test_state().await;
+        let mut session =
+            crate::fulfill::tests::paid_session("cs_test_success_disputed", "acme-annual");
+        session.payment_intent_id = Some("pi_disputed".into());
+        crate::fulfill::tests::stub_session(&session);
+        let req = with_conn(
+            Request::get("/success?session_id=cs_test_success_disputed")
+                .body(Body::empty())
+                .unwrap(),
+        );
+        let resp = send(state.clone(), req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(body.contains("being checked"), "{body}");
+        assert_eq!(count(&state, "licenses").await, 0);
+        let hold = crate::db::open_hold(&state.db, &session.id)
+            .await
+            .unwrap()
+            .expect("hold");
+        assert_eq!(hold.reason, "dispute:charge:ch_disputed");
+    }
+
+    #[tokio::test]
+    async fn checkout_stripe_unreachable_is_502() {
+        let state = test_state().await;
+        let req = with_conn(
+            Request::post("/checkout")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from("sku=acme-annual"))
+                .unwrap(),
+        );
+        let resp = send(state, req).await;
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
     }
 
     #[tokio::test]

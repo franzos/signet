@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.1.4] - 2026-10-22
+
+### Added
+- Stripe through the shared `stripe-edge` crate, pinned to `v0.1.0`
+- `signet-shop holds`, `release` and `reconcile` operator commands
+- Mail outbox with retries instead of send-on-insert
+- Refunds and disputes revoke the license; a reversal before fulfilment holds the sale
+- The charge is checked before minting, so a refunded or disputed payment is held
+- Unresolvable refunds and disputes are held under `charge:<id>` and closed with `release`
+
+### Changed
+- Livemode is read from the Stripe account at startup
+- Checkout tags sessions with `metadata.service`; other apps' events on a shared account are ignored
+- The webhook fulfils the session as read back from Stripe, not the event payload
+- Default log filter is `info,stripe=error`
+
+### Fixed
+- Underpaid, wrong-currency and wrong-mode payments are held for review instead of failing silently
+
 ## [0.1.3] - 2026-08-08
 
 ### Added

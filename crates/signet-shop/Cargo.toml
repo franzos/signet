@@ -24,8 +24,8 @@ include_dir = "0.7"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros"] }
 ed25519-dalek = { version = "2" }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 toml = "0.8"
-toml_edit = "0.22"
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 tracing = "0.1"
@@ -34,23 +34,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Email on purchase: polymail's `config` schema (ProviderConfig), with SMTP
 # (self-hosted) and Lettermint (HTTP) compiled in, both rustls.
 polymail = { version = "0.1.6", default-features = false, features = ["config", "smtp", "lettermint-reqwest-013"] }
-# Lettermint's reqwest links aws-lc-rs while async-stripe links ring, so rustls
-# sees two crypto providers and can't auto-pick. We install ring as the process
-# default at startup to resolve it; this direct dep exposes that provider.
-rustls = { version = "0.23", default-features = false, features = ["ring"] }
 
-# Stripe via async-stripe 1.0-rc (modular; hyper client + rustls). The webhook
-# crate replaces our hand-rolled HMAC signature verification, so signature
-# verification rides on this crate. Accepted risk: deliberately pinned to a
-# pre-release (no stable 1.0 exists yet); move to 1.0 stable once released.
-# Keep the exact `=` pins until then.
-async-stripe = { version = "=1.0.0-rc.6", default-features = false, features = ["rustls-tls-webpki-roots", "rustls-ring"] }
-async-stripe-types = "=1.0.0-rc.6"
-async-stripe-shared = "=1.0.0-rc.6"
-async-stripe-checkout = { version = "=1.0.0-rc.6", features = ["checkout_session"] }
-async-stripe-product = { version = "=1.0.0-rc.6", features = ["product", "price"] }
-async-stripe-webhook = { version = "=1.0.0-rc.6", features = ["async-stripe-checkout"] }
+stripe-edge = { git = "https://git.gofranz.com/franz/stripe-edge", tag = "v0.1.0" }
+uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
+stripe-edge = { git = "https://git.gofranz.com/franz/stripe-edge", tag = "v0.1.0", features = ["test-util"] }
 tower = { version = "0.5", features = ["util"] }
 tempfile = "3"

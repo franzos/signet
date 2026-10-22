@@ -35,6 +35,28 @@ title = "Example Licenses"
 # user = "apikey"                     # optional
 # pass = ""                           # set via SIGNET_EMAIL__PASS
 
+# VAT / sales tax. Omit this whole section for `mode = "none"`: the shop charges
+# the catalog amount and says nothing about tax, which is what a seller who
+# prices tax-inclusive and splits it in their own books wants.
+#
+# `mode = "stripe"` turns on Stripe Tax: Stripe computes the destination rate,
+# collects the billing address it needs as location evidence, and validates a
+# buyer's VAT ID against VIES so an intra-EU B2B sale is reverse-charged. It
+# costs 0.5% per taxed transaction with no monthly fee, and it does NOT file
+# your returns. Run `provision-stripe` after switching: it replaces the prices
+# with tax-inclusive ones.
+#
+# The seller fields are printed on the purchase receipt emailed to the buyer.
+# That receipt is a payment record, NOT a fiscal invoice: Portugal (and others)
+# require invoices to come from certified software with a controlled sequential
+# number, so Signet deliberately does not issue one. Say so in `receipt_note`.
+# [tax]
+# mode = "stripe"                     # "none" (default) | "stripe"
+# seller_name = "Example Lda"         # required when mode = "stripe"
+# seller_address = "Rua Example 1, 1000-001 Lisboa, Portugal"
+# seller_vat_id = "PT999999990"
+# receipt_note = "This is a payment receipt, not a fiscal invoice."
+
 # Markdown content pages live in content/<slug>.md (per-site, git-ignored, path
 # via CONTENT_DIR, default ./content) and are served at /p/<slug>. Set
 # footer = true to list them in the footer; the link only shows if the markdown

@@ -152,9 +152,9 @@ dependencies = [
 
 [[package]]
 name = "async-stripe"
-version = "1.0.0-rc.6"
+version = "1.0.0-rc.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fbbfb37a60928c837f3d1db41ed9561a69e86052e5ea11451bfc8406fd22d99e"
+checksum = "865e5a3e16d6b34d2a1717cd544e33100463b5cf312095b894bd46c435a7b97c"
 dependencies = [
  "async-stripe-client-core",
  "async-stripe-shared",
@@ -170,10 +170,25 @@ dependencies = [
 ]
 
 [[package]]
-name = "async-stripe-checkout"
-version = "1.0.0-rc.6"
+name = "async-stripe-billing"
+version = "1.0.0-rc.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a7cc969611dc770fbffe5520128d53fb7618f2f64cacdcc5fdc80066042bd92"
+checksum = "5d78c9418d14d4886f06251836d92437a77a7b82c9db9096b48ef36752e2df3e"
+dependencies = [
+ "async-stripe-client-core",
+ "async-stripe-shared",
+ "async-stripe-types",
+ "miniserde",
+ "serde",
+ "smol_str",
+ "tracing",
+]
+
+[[package]]
+name = "async-stripe-checkout"
+version = "1.0.0-rc.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "022e3ef4d54938ba8a346c132e4df1298b453c2bf36f2ea8b1a4162fc7f89141"
 dependencies = [
  "async-stripe-client-core",
  "async-stripe-shared",
@@ -186,9 +201,9 @@ dependencies = [
 
 [[package]]
 name = "async-stripe-client-core"
-version = "1.0.0-rc.6"
+version = "1.0.0-rc.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fb102f82be32b4be0af662746ecc1b632371903eb096e8d840505431277e090c"
+checksum = "3441797b3acbea16f073e121f9003534a5307bb108932c43415a8dd2bcc40420"
 dependencies = [
  "async-stripe-shared",
  "async-stripe-types",
@@ -203,10 +218,25 @@ dependencies = [
 ]
 
 [[package]]
-name = "async-stripe-product"
-version = "1.0.0-rc.6"
+name = "async-stripe-core"
+version = "1.0.0-rc.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7453e7a781fe3f4933b3662dd174b7b6aa02e0e96a77b2c8945732ba132f1392"
+checksum = "6096d17c61a7fdef95eaa1e143517ca2c412161344bb2147f0ebf3d744ce4a1f"
+dependencies = [
+ "async-stripe-client-core",
+ "async-stripe-shared",
+ "async-stripe-types",
+ "miniserde",
+ "serde",
+ "smol_str",
+ "tracing",
+]
+
+[[package]]
+name = "async-stripe-product"
+version = "1.0.0-rc.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f69e1562df05093f7cdf96490b37e7c88ccb6dae6dfbc6f07049463c342ac0ea"
 dependencies = [
  "async-stripe-client-core",
  "async-stripe-shared",
@@ -219,9 +249,9 @@ dependencies = [
 
 [[package]]
 name = "async-stripe-shared"
-version = "1.0.0-rc.6"
+version = "1.0.0-rc.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "80a31d49bf137889e1ece81c2aca94d144c041815388df5b8616a787e7beb611"
+checksum = "4830148224a1d44fc85847979f657f88d6b2689567dc100c1d1cb54d1514a07b"
 dependencies = [
  "async-stripe-types",
  "miniserde",
@@ -232,9 +262,9 @@ dependencies = [
 
 [[package]]
 name = "async-stripe-types"
-version = "1.0.0-rc.6"
+version = "1.0.0-rc.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b461a9cc3cd14d56843aa9eced46b3d0e8c1937a2c735e224be5c6e529258c22"
+checksum = "c921209c3bf6c54a5917734ccc732575d11d75848f7c1f64617824f0376b9065"
 dependencies = [
  "miniserde",
  "serde",
@@ -243,19 +273,21 @@ dependencies = [
 
 [[package]]
 name = "async-stripe-webhook"
-version = "1.0.0-rc.6"
+version = "1.0.0-rc.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "adb8ab49949e196b392c827e319ec6950385a21721324dbb67bd5b2a0388bab4"
+checksum = "c11869af4890240f68228512a67ca6da8fedb39c8e5e41189d06613a9e88fffa"
 dependencies = [
+ "async-stripe-billing",
  "async-stripe-checkout",
+ "async-stripe-core",
  "async-stripe-shared",
  "async-stripe-types",
  "chrono",
  "hex",
- "hmac 0.12.1",
+ "hmac 0.13.0",
  "miniserde",
  "serde",
- "sha2 0.10.9",
+ "sha2 0.11.0",
  "thiserror 2.0.18",
  "tracing",
 ]
@@ -2736,7 +2768,7 @@ dependencies = [
 
 [[package]]
 name = "signet-issuer"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -2752,40 +2784,35 @@ dependencies = [
 
 [[package]]
 name = "signet-shop"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "askama",
- "async-stripe",
- "async-stripe-checkout",
- "async-stripe-product",
- "async-stripe-shared",
- "async-stripe-types",
- "async-stripe-webhook",
  "axum",
  "chrono",
  "ed25519-dalek",
  "include_dir",
  "polymail",
  "pulldown-cmark",
- "rustls",
  "serde",
+ "serde_json",
  "signetlib",
  "sqlx",
+ "stripe-edge",
  "tempfile",
  "tokio",
  "toml",
- "toml_edit",
  "tower",
  "tower-http",
  "tower_governor",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
 name = "signetlib"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "base64",
  "ciborium",
@@ -2830,12 +2857,12 @@ dependencies = [
 
 [[package]]
 name = "smol_str"
-version = "0.3.2"
+version = "0.3.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9676b89cd56310a87b93dec47b11af744f34d5fc9f367b829474eec0a891350d"
+checksum = "4aaa7368fcf4852a4c2dd92df0cace6a71f2091ca0a23391ce7f3a31833f1523"
 dependencies = [
  "borsh",
- "serde",
+ "serde_core",
 ]
 
 [[package]]
@@ -3079,6 +3106,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "stripe-edge"
+version = "0.1.0"
+source = "git+https://git.gofranz.com/franz/stripe-edge?tag=v0.1.0#7dfa7bbccdaa4521448c76c4af76c0daa4106a30"
+dependencies = [
+ "async-stripe",
+ "async-stripe-billing",
+ "async-stripe-checkout",
+ "async-stripe-core",
+ "async-stripe-product",
+ "async-stripe-shared",
+ "async-stripe-types",
+ "async-stripe-webhook",
+ "rustls",
+ "serde_json",
+ "thiserror 2.0.18",
+ "toml_edit 0.25.17+spec-1.1.0",
+]
+
+[[package]]
 name = "strsim"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3282,8 +3328,8 @@ checksum = "dc1beb996b9d83529a9e75c17a1686767d148d70663143c7854d8b4a09ced362"
 dependencies = [
  "serde",
  "serde_spanned",
- "toml_datetime",
- "toml_edit",
+ "toml_datetime 0.6.11",
+ "toml_edit 0.22.27",
 ]
 
 [[package]]
@@ -3296,6 +3342,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "toml_datetime"
+version = "1.1.2+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2b86d767906c6c42421dcba507eb9d203e779497710a47782a224bb871653053"
+dependencies = [
+ "serde_core",
+]
+
+[[package]]
 name = "toml_edit"
 version = "0.22.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3304,9 +3359,31 @@ dependencies = [
  "indexmap",
  "serde",
  "serde_spanned",
- "toml_datetime",
+ "toml_datetime 0.6.11",
  "toml_write",
  "winnow 0.7.15",
+]
+
+[[package]]
+name = "toml_edit"
+version = "0.25.17+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e3641d5bbb5349a79e1020a242d251efbc546ad8048d133958323ce9c40a9c9c"
+dependencies = [
+ "indexmap",
+ "toml_datetime 1.1.2+spec-1.1.0",
+ "toml_parser",
+ "toml_writer",
+ "winnow 1.0.3",
+]
+
+[[package]]
+name = "toml_parser"
+version = "1.1.5+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "baa693a8032d7e1cada7d0041e96126df243179ff061456783ac7f12bda4744c"
+dependencies = [
+ "winnow 1.0.3",
 ]
 
 [[package]]
@@ -3314,6 +3391,12 @@ name = "toml_write"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5d99f8c9a7727884afe522e9bd5edbfc91a3312b36a77b5fb8926e4c31a41801"
+
+[[package]]
+name = "toml_writer"
+version = "1.1.3+spec-1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "06bdbd8cfc056b8d2e2e85f29b56a3bdbecb527cef81eb39e3e7b98af4652770"
 
 [[package]]
 name = "tower"
@@ -3534,6 +3617,17 @@ name = "utf8parse"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
+
+[[package]]
+name = "uuid"
+version = "1.28.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7cc1186384beb7dd8eedea376413fd654937285ea6c9cfbb928dc3043ea4b606"
+dependencies = [
+ "getrandom 0.4.3",
+ "js-sys",
+ "wasm-bindgen",
+]
 
 [[package]]
 name = "valuable"

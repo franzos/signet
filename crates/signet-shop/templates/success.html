@@ -1,7 +1,10 @@
 {% extends "base.html" %}
 {% block title %}Your license{% endblock %}
 {% block content %}
-  {% if pending %}
+  {% if held %}
+    <h1>Your payment is being checked</h1>
+    <p>We received your payment and are checking it before your license is issued. You will hear from us by email.</p>
+  {% elif pending %}
     <h1>Payment is still processing</h1>
     <p>Your payment has not been confirmed yet. This can take a moment.</p>
     <p><a class="button" href="/success?session_id={{ session_id }}">Refresh</a></p>
