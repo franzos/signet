@@ -40,7 +40,7 @@ impl AppConfig {
         let req = |k: &str| get(k).ok_or_else(|| anyhow!("missing env var {k}"));
         Ok(Self {
             stripe_api_key: req("STRIPE_API_KEY")?,
-            stripe_webhook_secret: req("STRIPE_WEBHOOK_SECRET")?,
+            stripe_webhook_secret: validate_webhook_secret(req("STRIPE_WEBHOOK_SECRET")?)?,
             database_url: req("DATABASE_URL")?,
             base_url: validate_base_url(req("BASE_URL")?)?,
             keys_dir: get("KEYS_DIR").unwrap_or_else(|| "./keys".into()).into(),
@@ -53,6 +53,15 @@ impl AppConfig {
                 .unwrap_or(false),
         })
     }
+}
+
+fn validate_webhook_secret(secret: String) -> Result<String> {
+    if secret.len() > "whsec_".len() && secret.starts_with("whsec_") {
+        return Ok(secret);
+    }
+    Err(anyhow!(
+        "STRIPE_WEBHOOK_SECRET must be the endpoint's signing secret (whsec_...)"
+    ))
 }
 
 /// BASE_URL ends up in Stripe success/cancel URLs; a plain-http value would
@@ -99,6 +108,33 @@ mod tests {
     fn from_env_errors_on_missing_secret() {
         let get = |_: &str| None;
         assert!(AppConfig::from_getter(&get).is_err());
+    }
+
+    #[test]
+    fn webhook_secret_must_be_a_whsec_value() {
+        for (secret, ok) in [
+            ("whsec_x", true),
+            ("", false),
+            ("whsec_", false),
+            ("wh", false),
+            ("sk_test_x", false),
+        ] {
+            let get = |k: &str| -> Option<String> {
+                match k {
+                    "STRIPE_API_KEY" => Some("rk_test_x".into()),
+                    "STRIPE_WEBHOOK_SECRET" => Some(secret.into()),
+                    "DATABASE_URL" => Some("sqlite::memory:".into()),
+                    "BASE_URL" => Some("https://buy.example".into()),
+                    _ => None,
+                }
+            };
+            let res = AppConfig::from_getter(&get);
+            assert_eq!(res.is_ok(), ok, "{secret:?}");
+            if !ok {
+                let err = res.unwrap_err().to_string();
+                assert!(err.contains("STRIPE_WEBHOOK_SECRET"), "{err}");
+            }
+        }
     }
 
     #[test]

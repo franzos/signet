@@ -10,13 +10,27 @@ use crate::outbox;
 use crate::state::AppState;
 
 pub enum FulfillOutcome {
-    /// Boxed: the record is large and the other variants are empty.
-    Ready(Box<StoredLicense>),
+    /// `inserted` is true only for the call that stored the licence.
+    Ready {
+        /// Boxed: the record is large and the other variants are empty.
+        licence: Box<StoredLicense>,
+        inserted: bool,
+    },
     Pending,
-    /// Paid, but held in `holds` until the operator releases it.
+    /// Paid, but held in `holds` until the operator releases it, or the licence is revoked.
     Held,
-    /// Stripe has no such session for this shop: unknown, long-expired or another service's id.
-    LookupFailed,
+}
+
+impl FulfillOutcome {
+    fn stored(licence: StoredLicense, inserted: bool) -> Self {
+        if licence.revoked_at.is_some() {
+            return Self::Held;
+        }
+        Self::Ready {
+            licence: Box::new(licence),
+            inserted,
+        }
+    }
 }
 
 /// Why a paid session is held instead of fulfilled. Displays as the stored
@@ -78,28 +92,22 @@ pub async fn check_payment(state: &AppState, session: &SessionInfo) -> Result<Pa
     }
 }
 
-/// Whether `metadata.service` names another app; untagged sessions are ours.
-pub fn other_service(session: &SessionInfo) -> bool {
-    session
-        .metadata
-        .get("service")
-        .is_some_and(|svc| svc != crate::STRIPE_SERVICE)
-}
-
-pub async fn fulfill(state: &AppState, session_id: &str) -> Result<FulfillOutcome> {
+/// `None` when Stripe has no such session for this shop: unknown, long-expired or another
+/// service's id.
+pub async fn fulfill(state: &AppState, session_id: &str) -> Result<Option<FulfillOutcome>> {
     if let Some(existing) = db::get_by_session(&state.db, session_id).await? {
-        return Ok(FulfillOutcome::Ready(Box::new(existing)));
+        return Ok(Some(FulfillOutcome::stored(existing, false)));
     }
     if db::open_hold(&state.db, session_id).await?.is_some() {
-        return Ok(FulfillOutcome::Held);
+        return Ok(Some(FulfillOutcome::Held));
     }
     let Some(info) = (state.lookups.session)(state, session_id).await? else {
-        return Ok(FulfillOutcome::LookupFailed);
+        return Ok(None);
     };
-    if other_service(&info) {
-        return Ok(FulfillOutcome::LookupFailed);
+    if !info.belongs_to(crate::STRIPE_SERVICE) {
+        return Ok(None);
     }
-    fulfill_paid_session(state, &info).await
+    fulfill_paid_session(state, &info).await.map(Some)
 }
 
 pub async fn fulfill_paid_session(
@@ -110,7 +118,7 @@ pub async fn fulfill_paid_session(
         return Ok(FulfillOutcome::Pending);
     }
     if let Some(existing) = db::get_by_session(&state.db, &session.id).await? {
-        return Ok(FulfillOutcome::Ready(Box::new(existing)));
+        return Ok(FulfillOutcome::stored(existing, false));
     }
     if db::open_hold(&state.db, &session.id).await?.is_some() {
         return Ok(FulfillOutcome::Held);
@@ -128,8 +136,8 @@ pub async fn fulfill_paid_session(
     match prepared {
         Ok(rec) => {
             let mail = outbox::rows_for(state, &rec);
-            let (stored, _) = db::insert_or_get(&state.db, &rec, &mail).await?;
-            Ok(FulfillOutcome::Ready(Box::new(stored)))
+            let (stored, inserted) = db::insert_or_get(&state.db, &rec, &mail).await?;
+            Ok(FulfillOutcome::stored(stored, inserted))
         }
         Err(reason) => {
             let reason = reason.to_string();
@@ -264,17 +272,23 @@ term = "365d"
         .unwrap()
     }
 
+    pub(crate) const WEBHOOK_SECRET: &str = "whsec_test";
+
     pub(crate) async fn test_state() -> AppState {
-        state_with_catalog(test_catalog()).await
+        state_with(test_catalog(), "content".into()).await
     }
 
-    async fn state_with_catalog(catalog: crate::catalog::Catalog) -> AppState {
+    /// An offline test-mode state over an in-memory database, with live lookups.
+    pub(crate) async fn state_with(
+        catalog: crate::catalog::Catalog,
+        content_dir: std::path::PathBuf,
+    ) -> AppState {
         let cfg = crate::config::AppConfig {
             stripe_api_key: "sk_test_dummy".into(),
-            stripe_webhook_secret: "wh".into(),
+            stripe_webhook_secret: WEBHOOK_SECRET.into(),
             database_url: "sqlite::memory:".into(),
             keys_dir: "keys".into(),
-            content_dir: "content".into(),
+            content_dir,
             base_url: "http://x".into(),
             bind_addr: "127.0.0.1:0".into(),
             trust_proxy: false,
@@ -406,8 +420,8 @@ term = "365d"
 
         let first = super::fulfill_paid_session(&state, &s).await.unwrap();
         let rec = match first {
-            FulfillOutcome::Ready(r) => r,
-            _ => panic!("expected Ready"),
+            FulfillOutcome::Ready { licence: r, inserted: true } => r,
+            _ => panic!("expected a fresh Ready"),
         };
         // The company custom field is the license identity, not the billing name.
         assert_eq!(rec.customer, "Acme GmbH");
@@ -417,9 +431,45 @@ term = "365d"
         // Second call for the same session returns the identical stored blob.
         let second = super::fulfill_paid_session(&state, &s).await.unwrap();
         match second {
-            FulfillOutcome::Ready(r) => assert_eq!(r.blob, blob),
-            _ => panic!("expected Ready"),
+            FulfillOutcome::Ready { licence: r, inserted: false } => assert_eq!(r.blob, blob),
+            _ => panic!("expected a stored Ready"),
         }
+    }
+
+    #[tokio::test]
+    async fn revoked_licence_is_held_on_every_path() {
+        let state = stubbed_state().await;
+        let s = paid_session("cs_fulfill_revoked", "acme-business-annual");
+        stub_session(&s);
+        super::fulfill_paid_session(&state, &s).await.unwrap();
+        db::insert_hold(&state.db, &s.id, "refund:ch_r", None)
+            .await
+            .unwrap();
+        assert!(matches!(
+            super::fulfill_paid_session(&state, &s).await.unwrap(),
+            FulfillOutcome::Held
+        ));
+        assert!(matches!(
+            super::fulfill(&state, &s.id).await.unwrap(),
+            Some(FulfillOutcome::Held)
+        ));
+    }
+
+    #[tokio::test]
+    async fn licence_stored_revoked_under_a_reversal_hold_is_held() {
+        let state = test_state().await;
+        let s = paid_session("cs_fulfill_race", "acme-business-annual");
+        db::insert_hold(&state.db, &s.id, "refund:ch_race", None)
+            .await
+            .unwrap();
+        let rec = super::prepare(&state, &s, false).unwrap();
+        // The hold landed after the fast-path read; the insert stores the licence revoked.
+        let (stored, inserted) = db::insert_or_get(&state.db, &rec, &[]).await.unwrap();
+        assert!(inserted && stored.revoked_at.is_some());
+        assert!(matches!(
+            FulfillOutcome::stored(stored, inserted),
+            FulfillOutcome::Held
+        ));
     }
 
     const STRIPE_TAX: &str = r#"
@@ -431,7 +481,7 @@ seller_vat_id = "PT999999990"
 
     #[tokio::test]
     async fn tax_mode_stripe_records_the_vat_split() {
-        let state = state_with_catalog(test_catalog_with(STRIPE_TAX)).await;
+        let state = state_with(test_catalog_with(STRIPE_TAX), "content".into()).await;
         let rec = match super::fulfill_paid_session(
             &state,
             &taxed_session("cs_tax", "acme-business-annual"),
@@ -439,7 +489,7 @@ seller_vat_id = "PT999999990"
         .await
         .unwrap()
         {
-            FulfillOutcome::Ready(r) => r,
+            FulfillOutcome::Ready { licence: r, .. } => r,
             _ => panic!("expected Ready"),
         };
         assert_eq!(rec.amount_total, Some(49900));
@@ -451,13 +501,13 @@ seller_vat_id = "PT999999990"
 
     #[tokio::test]
     async fn reverse_charge_records_the_vat_id_and_zero_tax() {
-        let state = state_with_catalog(test_catalog_with(STRIPE_TAX)).await;
+        let state = state_with(test_catalog_with(STRIPE_TAX), "content".into()).await;
         let mut s = taxed_session("cs_rc", "acme-business-annual");
         s.tax.amount_tax = 0;
         s.tax.vat_id = Some("DE811907980".into());
         s.tax.exemption = Some("reverse".into());
         let rec = match super::fulfill_paid_session(&state, &s).await.unwrap() {
-            FulfillOutcome::Ready(r) => r,
+            FulfillOutcome::Ready { licence: r, .. } => r,
             _ => panic!("expected Ready"),
         };
         assert_eq!(rec.amount_tax, Some(0));
@@ -477,7 +527,7 @@ seller_vat_id = "PT999999990"
         .await
         .unwrap()
         {
-            FulfillOutcome::Ready(r) => r,
+            FulfillOutcome::Ready { licence: r, .. } => r,
             _ => panic!("expected Ready"),
         };
         assert_eq!(rec.amount_total, Some(49900));
@@ -566,7 +616,7 @@ seller_vat_id = "PT999999990"
         // The offline client errors on any Stripe call, so `Held` proves none was made.
         assert!(matches!(
             super::fulfill(&state, "cs_held").await.unwrap(),
-            FulfillOutcome::Held
+            Some(FulfillOutcome::Held)
         ));
         // A corrected replay stays held until the operator releases it.
         let s = paid_session("cs_held", "acme-business-annual");
@@ -583,7 +633,7 @@ seller_vat_id = "PT999999990"
         s.amount_total = Some(50000);
         assert!(matches!(
             super::fulfill_paid_session(&state, &s).await.unwrap(),
-            FulfillOutcome::Ready(_)
+            FulfillOutcome::Ready { .. }
         ));
     }
 
@@ -626,10 +676,7 @@ seller_vat_id = "PT999999990"
         let mut s = paid_session("cs_fulfill_formshive", "acme-business-annual");
         s.metadata.insert("service".into(), "formshive".into());
         stub_session(&s);
-        assert!(matches!(
-            super::fulfill(&state, &s.id).await.unwrap(),
-            FulfillOutcome::LookupFailed
-        ));
+        assert!(super::fulfill(&state, &s.id).await.unwrap().is_none());
         assert!(db::open_hold(&state.db, &s.id).await.unwrap().is_none());
         assert!(db::get_by_session(&state.db, &s.id)
             .await
@@ -664,7 +711,7 @@ seller_vat_id = "PT999999990"
         let globex_key = state.signing.get("globex").unwrap().verifying_key();
 
         let ready = |o| match o {
-            FulfillOutcome::Ready(r) => r,
+            FulfillOutcome::Ready { licence: r, .. } => r,
             _ => panic!("expected Ready"),
         };
         let f = ready(

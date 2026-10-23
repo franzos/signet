@@ -30,9 +30,10 @@ async fn main() -> Result<()> {
 
     let arg = |i| std::env::args().nth(i);
     match arg(1).as_deref() {
-        Some("provision-stripe") => provision::run().await,
+        Some("provision-stripe") => provision::run(arg(2).as_deref()).await,
         Some("holds") => cli::holds(arg(2).as_deref()).await,
         Some("release") => cli::release(arg(2).as_deref()).await,
+        Some("dismiss") => cli::dismiss(arg(2).as_deref()).await,
         Some("reconcile") => cli::reconcile(arg(2).as_deref(), arg(3).as_deref()).await,
         None | Some("serve") => serve().await,
         Some("--help" | "-h" | "help") => {
@@ -52,9 +53,10 @@ fn print_help() {
         "signet-shop - Stripe license shop\n\n\
          USAGE:\n  \
          signet-shop [serve]                       Run the web server (default)\n  \
-         signet-shop provision-stripe              Create Stripe products/prices from the catalog\n  \
+         signet-shop provision-stripe [--dry-run]  Create Stripe products/prices from the catalog (--dry-run: report only)\n  \
          signet-shop holds [--all]                 List open holds (--all: resolved too), dead mail and revoked licences\n  \
          signet-shop release <session_id>          Issue the licence for a held, paid session\n  \
+         signet-shop dismiss <id>                  Close an open hold without issuing a licence\n  \
          signet-shop reconcile --since YYYY-MM-DD  Fulfil paid Checkout Sessions created since the date (UTC)\n"
     );
 }

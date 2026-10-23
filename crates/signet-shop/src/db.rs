@@ -200,14 +200,7 @@ async fn insert_licence(
         .fetch_optional(&mut *conn)
         .await?;
         if let Some(reason) = reversal {
-            sqlx::query(
-                "UPDATE licenses SET revoked_at = strftime('%s','now'), revoked_reason = ?
-                 WHERE stripe_session_id = ?",
-            )
-            .bind(&reason)
-            .bind(&rec.stripe_session_id)
-            .execute(&mut *conn)
-            .await?;
+            revoke(conn, &rec.stripe_session_id, &reason).await?;
         } else {
             for m in mail {
                 enqueue(conn, m).await?;
@@ -244,8 +237,10 @@ async fn enqueue(conn: &mut SqliteConnection, m: &NewMail) -> Result<()> {
     Ok(())
 }
 
-/// Record a hold for a session, queueing `notify` only when the hold is new.
-/// Returns whether this call inserted it.
+/// Record a hold for a session, or reopen a closed one for a different reason,
+/// queueing `notify` only then. When the session already has a licence no hold
+/// is written; a refund or dispute reason revokes that licence instead. Returns
+/// whether a hold was written or a licence revoked.
 pub async fn insert_hold(
     pool: &SqlitePool,
     session_id: &str,
@@ -253,9 +248,12 @@ pub async fn insert_hold(
     notify: Option<NewMail>,
 ) -> Result<bool> {
     let mut tx = pool.begin().await?;
-    let inserted = sqlx::query(
-        "INSERT INTO holds (session_id, reason) VALUES (?, ?)
-         ON CONFLICT(session_id) DO NOTHING",
+    let held = sqlx::query(
+        "INSERT INTO holds (session_id, reason)
+         SELECT ?1, ?2 WHERE NOT EXISTS (SELECT 1 FROM licenses WHERE stripe_session_id = ?1)
+         ON CONFLICT(session_id) DO UPDATE
+           SET reason = excluded.reason, created_at = strftime('%s','now'), resolved_at = NULL
+           WHERE holds.resolved_at IS NOT NULL AND holds.reason <> excluded.reason",
     )
     .bind(session_id)
     .bind(reason)
@@ -263,13 +261,18 @@ pub async fn insert_hold(
     .await?
     .rows_affected()
         == 1;
-    if inserted {
+    let recorded = if held {
         if let Some(m) = notify {
             enqueue(&mut tx, &m).await?;
         }
-    }
+        true
+    } else if is_reversed(reason) {
+        revoke(&mut tx, session_id, reason).await?
+    } else {
+        false
+    };
     tx.commit().await?;
-    Ok(inserted)
+    Ok(recorded)
 }
 
 pub async fn open_hold(pool: &SqlitePool, session_id: &str) -> Result<Option<Hold>> {
@@ -311,14 +314,14 @@ pub async fn list_holds(pool: &SqlitePool, all: bool) -> Result<Vec<Hold>> {
 
 /// Mark a session's licence revoked. Returns `false` when there is no licence or
 /// it is already revoked, so the first reason recorded stays.
-pub async fn revoke(pool: &SqlitePool, session_id: &str, reason: &str) -> Result<bool> {
+async fn revoke(conn: &mut SqliteConnection, session_id: &str, reason: &str) -> Result<bool> {
     let done = sqlx::query(
         "UPDATE licenses SET revoked_at = strftime('%s','now'), revoked_reason = ?
          WHERE stripe_session_id = ? AND revoked_at IS NULL",
     )
     .bind(reason)
     .bind(session_id)
-    .execute(pool)
+    .execute(conn)
     .await?
     .rows_affected()
         == 1;
@@ -470,17 +473,74 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn revoke_keeps_the_first_reason() {
+    async fn reversal_hold_on_a_licence_revokes_and_keeps_the_first_reason() {
         let pool = connect("sqlite::memory:").await.unwrap();
-        assert!(!revoke(&pool, "cs_none", "refund:ch_1").await.unwrap());
         insert_or_get(&pool, &rec("cs_r", "lic_r"), &[])
             .await
             .unwrap();
-        assert!(revoke(&pool, "cs_r", "refund:ch_1").await.unwrap());
-        assert!(!revoke(&pool, "cs_r", "dispute:dp_1").await.unwrap());
+        assert!(insert_hold(&pool, "cs_r", "refund:ch_1", None)
+            .await
+            .unwrap());
+        assert!(!insert_hold(&pool, "cs_r", "dispute:dp_1", None)
+            .await
+            .unwrap());
         let revoked = list_revoked(&pool).await.unwrap();
         assert_eq!(revoked.len(), 1);
         assert_eq!(revoked[0].revoked_reason.as_deref(), Some("refund:ch_1"));
         assert!(revoked[0].revoked_at.is_some());
+        assert!(list_holds(&pool, true).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn ordinary_hold_on_a_licence_is_skipped() {
+        let pool = connect("sqlite::memory:").await.unwrap();
+        insert_or_get(&pool, &rec("cs_l", "lic_l"), &[])
+            .await
+            .unwrap();
+        let notice = NewMail {
+            kind: "hold_notice".into(),
+            recipient: "ops@b.c".into(),
+            payload: "{}".into(),
+        };
+        assert!(!insert_hold(&pool, "cs_l", "lookup_failed", Some(notice))
+            .await
+            .unwrap());
+        assert!(list_holds(&pool, true).await.unwrap().is_empty());
+        assert!(list_revoked(&pool).await.unwrap().is_empty());
+        let queued: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mail_outbox")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(queued, 0);
+    }
+
+    #[tokio::test]
+    async fn closed_hold_reopens_on_a_new_failure() {
+        let pool = connect("sqlite::memory:").await.unwrap();
+        insert_hold(&pool, "cs_o", "missing_sku", None).await.unwrap();
+        assert!(resolve_hold(&pool, "cs_o").await.unwrap());
+        sqlx::query("UPDATE holds SET created_at = 1000")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let notice = NewMail {
+            kind: "hold_notice".into(),
+            recipient: "ops@b.c".into(),
+            payload: "{}".into(),
+        };
+        assert!(insert_hold(&pool, "cs_o", "refund:ch_o", Some(notice))
+            .await
+            .unwrap());
+        let hold = open_hold(&pool, "cs_o").await.unwrap().expect("reopened");
+        assert_eq!(hold.reason, "refund:ch_o");
+        assert!(hold.created_at > 1000);
+        let queued: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mail_outbox")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(queued, 1);
+        assert_eq!(list_holds(&pool, true).await.unwrap().len(), 1);
+        assert!(resolve_hold(&pool, "cs_o").await.unwrap());
+        assert!(!resolve_hold(&pool, "cs_o").await.unwrap());
     }
 }

@@ -12,6 +12,7 @@ use crate::outbox;
 use crate::state::AppState;
 
 const RELEASE_USAGE: &str = "usage: signet-shop release <session_id>";
+const DISMISS_USAGE: &str = "usage: signet-shop dismiss <id>";
 const RECONCILE_USAGE: &str = "usage: signet-shop reconcile --since YYYY-MM-DD";
 
 /// `signet-shop holds [--all]`. Reads the database only; no Stripe connection.
@@ -83,10 +84,8 @@ fn utc(ts: i64) -> String {
 /// `signet-shop release <session_id>`.
 pub async fn release(session_id: Option<&str>) -> Result<()> {
     let id = session_id.ok_or_else(|| anyhow!(RELEASE_USAGE))?;
-    if id.starts_with("charge:") {
-        let pool = db::connect(&AppConfig::from_env()?.database_url).await?;
-        println!("{}", close_charge_hold(&pool, id).await?);
-        return Ok(());
+    if !id.starts_with("cs_") {
+        bail!("{id} is not a Checkout Session id; close its hold with `signet-shop dismiss {id}`");
     }
     let state = AppState::build(AppConfig::from_env()?).await?;
     releasable(&state, id).await?;
@@ -105,15 +104,27 @@ pub async fn release(session_id: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-/// Resolves an open `charge:<id>` hold; it has no session to mint for.
-async fn close_charge_hold(pool: &SqlitePool, id: &str) -> Result<String> {
+/// `signet-shop dismiss <id>`. Reads the database only; no Stripe connection.
+pub async fn dismiss(id: Option<&str>) -> Result<()> {
+    let id = id.ok_or_else(|| anyhow!(DISMISS_USAGE))?;
+    let pool = db::connect(&AppConfig::from_env()?.database_url).await?;
+    println!("{}", dismiss_hold(&pool, id).await?);
+    Ok(())
+}
+
+/// Resolves any open hold without minting.
+async fn dismiss_hold(pool: &SqlitePool, id: &str) -> Result<String> {
     if !db::resolve_hold(pool, id).await? {
         bail!("no open hold for {id}");
     }
-    Ok(format!(
-        "hold {id} closed: it recorded a refund or dispute that could not be matched to a sale; \
-         check the charge in Stripe and revoke any licence by hand"
-    ))
+    Ok(if id.starts_with("charge:") {
+        format!(
+            "hold {id} closed: it recorded a refund or dispute that could not be matched to a \
+             sale; check the charge in Stripe and revoke any licence by hand"
+        )
+    } else {
+        format!("hold {id} closed without a licence")
+    })
 }
 
 /// Errors unless the session has an open hold that records no refund or dispute.
@@ -207,19 +218,11 @@ struct Tally {
 async fn reconcile_sessions(state: &AppState, sessions: &[SessionInfo]) -> Tally {
     let mut t = Tally::default();
     for s in sessions {
-        let present = match db::get_by_session(&state.db, &s.id).await {
-            Ok(found) => found.is_some(),
-            Err(e) => {
-                tracing::error!("reconcile: licence lookup failed: {e:#}");
-                t.errors += 1;
-                continue;
-            }
-        };
         match fulfill::fulfill_paid_session(state, s).await {
-            Ok(FulfillOutcome::Ready(_)) if present => t.present += 1,
-            Ok(FulfillOutcome::Ready(_)) => t.fulfilled += 1,
+            Ok(FulfillOutcome::Ready { inserted: true, .. }) => t.fulfilled += 1,
+            Ok(FulfillOutcome::Ready { inserted: false, .. }) => t.present += 1,
             Ok(FulfillOutcome::Held) => t.held += 1,
-            Ok(FulfillOutcome::Pending | FulfillOutcome::LookupFailed) => {
+            Ok(FulfillOutcome::Pending) => {
                 tracing::error!("reconcile: paid session not fulfilled");
                 t.errors += 1;
             }
@@ -364,21 +367,47 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn charge_hold_is_closed_without_a_licence() {
+    async fn charge_hold_is_dismissed_without_a_licence() {
         let state = test_state().await;
         db::insert_hold(&state.db, "charge:ch_x", "lookup_failed:permanent", None)
             .await
             .unwrap();
-        let msg = close_charge_hold(&state.db, "charge:ch_x").await.unwrap();
+        let msg = dismiss_hold(&state.db, "charge:ch_x").await.unwrap();
         assert!(msg.starts_with("hold charge:ch_x closed:"), "{msg}");
         assert!(db::open_hold(&state.db, "charge:ch_x")
             .await
             .unwrap()
             .is_none());
-        let err = close_charge_hold(&state.db, "charge:ch_x")
-            .await
-            .unwrap_err();
+        let err = dismiss_hold(&state.db, "charge:ch_x").await.unwrap_err();
         assert_eq!(err.to_string(), "no open hold for charge:ch_x");
+    }
+
+    #[tokio::test]
+    async fn session_hold_is_dismissed_and_a_new_failure_reopens_it() {
+        let state = test_state().await;
+        let mut s = paid_session("cs_dismiss", SKU);
+        s.amount_total = Some(1);
+        fulfill::fulfill_paid_session(&state, &s).await.unwrap();
+        let msg = dismiss_hold(&state.db, "cs_dismiss").await.unwrap();
+        assert_eq!(msg, "hold cs_dismiss closed without a licence");
+        assert!(db::get_by_session(&state.db, "cs_dismiss")
+            .await
+            .unwrap()
+            .is_none());
+
+        assert!(matches!(
+            fulfill::fulfill_paid_session(&state, &s).await.unwrap(),
+            FulfillOutcome::Held
+        ));
+        assert!(db::open_hold(&state.db, "cs_dismiss").await.unwrap().is_none());
+        assert_eq!(db::list_holds(&state.db, true).await.unwrap().len(), 1);
+
+        s.amount_total = Some(2);
+        fulfill::fulfill_paid_session(&state, &s).await.unwrap();
+        let hold = db::open_hold(&state.db, "cs_dismiss").await.unwrap().unwrap();
+        assert_eq!(hold.reason, "mismatch:amount 2 is below 49900");
+        dismiss_hold(&state.db, "cs_dismiss").await.unwrap();
+        assert_eq!(db::list_holds(&state.db, true).await.unwrap().len(), 1);
     }
 
     #[tokio::test]
@@ -393,7 +422,9 @@ mod tests {
         fulfill::fulfill_paid_session(&state, &paid_session("cs_r", SKU))
             .await
             .unwrap();
-        db::revoke(&state.db, "cs_r", "refund:ch_1").await.unwrap();
+        db::insert_hold(&state.db, "cs_r", "refund:ch_1", None)
+            .await
+            .unwrap();
         sqlx::query("UPDATE holds SET created_at = 1000")
             .execute(&state.db)
             .await

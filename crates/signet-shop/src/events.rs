@@ -26,10 +26,9 @@ pub async fn handle(state: &AppState, event: Event) -> Result<()> {
                 Err(e) => return Err(e.into()),
             };
             let outcome = match fulfill::fulfill_paid_session(state, &session).await? {
-                FulfillOutcome::Ready(_) => "ready",
+                FulfillOutcome::Ready { .. } => "ready",
                 FulfillOutcome::Pending => "pending",
                 FulfillOutcome::Held => "held",
-                FulfillOutcome::LookupFailed => "lookup_failed",
             };
             tracing::info!(%event_id, outcome, "checkout session completed");
         }
@@ -83,7 +82,7 @@ async fn resolve(
     charge_id: &str,
 ) -> Result<Option<(SessionInfo, ChargeInfo)>> {
     match (state.lookups.charge)(state, charge_id).await {
-        Ok(Some((session, _))) if fulfill::other_service(&session) => {
+        Ok(Some((session, _))) if !session.belongs_to(crate::STRIPE_SERVICE) => {
             tracing::debug!(%event_id, %charge_id, "charge belongs to another service");
             Ok(None)
         }
@@ -107,10 +106,10 @@ async fn resolve(
 }
 
 /// Records a hold with the operator notice.
-async fn hold(state: &AppState, id: &str, reason: &str) -> Result<()> {
+pub(crate) async fn hold(state: &AppState, id: &str, reason: &str) -> Result<()> {
     let notify = outbox::hold_row(state, id, reason);
     if db::insert_hold(&state.db, id, reason, notify).await? {
-        tracing::warn!(%reason, "lookup failure held");
+        tracing::warn!(%reason, "hold recorded");
     }
     Ok(())
 }
@@ -121,21 +120,11 @@ async fn revoke(
     session: &SessionInfo,
     reason: &str,
 ) -> Result<()> {
-    // Hold first: a concurrent release then either refuses or has inserted the licence revoked below.
-    let held = db::mark_hold_reversed(&state.db, &session.id, reason).await?;
-    if db::revoke(&state.db, &session.id, reason).await? {
-        tracing::warn!(%event_id, %reason, "licence revoked");
-    } else if held {
+    // Hold first: a concurrent release then refuses, or has stored the licence the insert below revokes.
+    if db::mark_hold_reversed(&state.db, &session.id, reason).await? {
         tracing::warn!(%event_id, %reason, "held sale reversed, release refused");
-    } else {
-        // A paid session stays `paid` after a refund; the hold keeps later fulfils from minting.
-        db::insert_hold(&state.db, &session.id, reason, None).await?;
-        // A licence inserted between the first revoke and the hold insert.
-        if db::revoke(&state.db, &session.id, reason).await? {
-            tracing::warn!(%event_id, %reason, "licence revoked");
-        } else {
-            tracing::warn!(%event_id, %reason, "reversal recorded before fulfilment");
-        }
+    } else if db::insert_hold(&state.db, &session.id, reason, None).await? {
+        tracing::warn!(%event_id, %reason, "licence revoked or reversal recorded");
     }
     Ok(())
 }
@@ -187,7 +176,7 @@ mod tests {
         let s = paid_session(SESSION, "acme-business-annual");
         assert!(matches!(
             fulfill::fulfill_paid_session(&state, &s).await.unwrap(),
-            FulfillOutcome::Ready(_)
+            FulfillOutcome::Ready { .. }
         ));
         state
     }

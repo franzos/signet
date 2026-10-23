@@ -146,6 +146,9 @@ async fn build(state: &AppState, mail: &MailService, row: &OutboxMail) -> Result
     let Some(lic) = db::get_by_session(&state.db, &p.session_id).await? else {
         return Ok(None);
     };
+    if lic.revoked_at.is_some() {
+        return Ok(None);
+    }
     let Some(sku) = state.catalog.by_id(&lic.sku) else {
         return Ok(None);
     };
@@ -267,7 +270,7 @@ pub(crate) mod tests {
         let s = paid_session(session_id, "acme-business-annual");
         assert!(matches!(
             fulfill_paid_session(state, &s).await.unwrap(),
-            FulfillOutcome::Ready(_)
+            FulfillOutcome::Ready { .. }
         ));
         sqlx::query("UPDATE mail_outbox SET next_attempt_at = ?")
             .bind(at)
@@ -397,6 +400,22 @@ pub(crate) mod tests {
         assert!(after.iter().all(|r| r.sent && r.attempts == 0), "{after:?}");
         assert!(mailer.sent.lock().unwrap().is_empty());
         assert_eq!(db::dead_mail_count(&state.db).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn mail_for_a_revoked_licence_is_closed_without_sending() {
+        let mailer = TestMailer::default();
+        let state = with_mail(test_state().await, &mailer);
+        sold(&state, "cs_revoked_mail", 0).await;
+        db::insert_hold(&state.db, "cs_revoked_mail", "refund:ch_rm", None)
+            .await
+            .unwrap();
+        drain_once(&state, 0).await.unwrap();
+        assert_eq!(
+            rows(&state).await,
+            [row(LICENSE, 0, 0, true), row(SALE_NOTICE, 0, 0, true)]
+        );
+        assert!(mailer.sent.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

@@ -1,18 +1,23 @@
-use anyhow::{Context, Result};
-use stripe_edge::{PriceChange, PriceSpec, Stripe};
+use anyhow::{bail, Context, Result};
+use stripe_edge::{PriceAction, PriceChange, PriceSpec, ProductAction, Stripe};
 
 use crate::catalog::{self, Sku, TaxMode};
 
-/// `signet-shop provision-stripe`: reconcile every SKU in `catalog.toml` with
-/// Stripe. Each SKU gets a Product (`signet_<sku id>`, or the product of the
-/// price the catalog already names) and a one-time Price, and the resolved
-/// `stripe_price_id` is written back into the file, preserving comments. It is
-/// idempotent: an unchanged catalog produces no Stripe calls that mutate state
-/// and no file write.
-pub async fn run() -> Result<()> {
-    let api_key = std::env::var("STRIPE_API_KEY")
-        .or_else(|_| std::env::var("STRIPE_SECRET_KEY"))
-        .context("set STRIPE_API_KEY (or STRIPE_SECRET_KEY) to provision Stripe")?;
+/// `signet-shop provision-stripe [--dry-run]`: reconcile every SKU in
+/// `catalog.toml` with Stripe. Each SKU gets a Product (`signet_<sku id>`, or the
+/// product of the price the catalog already names) and a one-time Price, and the
+/// resolved `stripe_price_id` is written back into the file, preserving comments.
+/// It is idempotent: an unchanged catalog produces no Stripe calls that mutate
+/// state and no file write. `--dry-run` reports the action per SKU using reads only.
+pub async fn run(flag: Option<&str>) -> Result<()> {
+    let dry_run = match flag {
+        None => false,
+        Some("--dry-run") => true,
+        Some(other) => {
+            bail!("unknown argument {other}; usage: signet-shop provision-stripe [--dry-run]")
+        }
+    };
+    let api_key = std::env::var("STRIPE_API_KEY").context("set STRIPE_API_KEY to provision Stripe")?;
     let stripe = Stripe::connect(&api_key, crate::STRIPE_SERVICE)
         .await
         .context("connect to Stripe")?;
@@ -22,10 +27,22 @@ pub async fn run() -> Result<()> {
         .with_context(|| format!("read catalog {}", path.display()))?;
     let cat = catalog::parse(&text).with_context(|| format!("parse catalog {}", path.display()))?;
 
-    println!("Reconciling {} SKU(s) against Stripe.\n", cat.skus.len());
+    let verb = if dry_run { "Previewing" } else { "Reconciling" };
+    println!("{verb} {} SKU(s) against Stripe.\n", cat.skus.len());
     println!("{:<32} {:<8} price id", "sku", "status");
 
     let tax_inclusive = cat.tax.mode == TaxMode::Stripe;
+    if dry_run {
+        for sku in &cat.skus {
+            let (product, price) = stripe
+                .preview_price(&price_spec(sku, tax_inclusive))
+                .await
+                .with_context(|| format!("preview {}", sku.id))?;
+            println!("{}", preview_line(sku, &product, &price));
+        }
+        println!("\nDry run: nothing written to Stripe or {}.", path.display());
+        return Ok(());
+    }
     let mut changed = false;
     for sku in &cat.skus {
         let change = stripe
@@ -60,6 +77,23 @@ pub async fn run() -> Result<()> {
     Ok(())
 }
 
+/// One dry-run row, labelled like the write run's statuses.
+fn preview_line(sku: &Sku, product: &ProductAction, price: &PriceAction) -> String {
+    let product = match product {
+        ProductAction::Existing(id) => id.clone(),
+        ProductAction::Reactivate(id) => format!("{id}, reactivated"),
+        ProductAction::Create(id) => format!("{id}, created"),
+    };
+    match price {
+        PriceAction::Unchanged => format!("{:<32} {:<8} {}", sku.id, "ok", sku.stripe_price_id),
+        PriceAction::Create => format!("{:<32} {:<8} new price on {product}", sku.id, "set"),
+        PriceAction::Supersede { old } => format!(
+            "{:<32} {:<8} new price on {product} (replaces {old})",
+            sku.id, "updated"
+        ),
+    }
+}
+
 fn price_spec(sku: &Sku, tax_inclusive: bool) -> PriceSpec {
     PriceSpec {
         product_key: sku.id.clone(),
@@ -75,6 +109,37 @@ fn price_spec(sku: &Sku, tax_inclusive: bool) -> PriceSpec {
 
 #[cfg(test)]
 mod tests {
+    use stripe_edge::{PriceAction, ProductAction};
+
+    #[test]
+    fn preview_line_names_the_action() {
+        let cat = crate::catalog::parse(include_str!("../../../catalog.example.toml")).unwrap();
+        let mut sku = cat.skus[0].clone();
+        sku.stripe_price_id = "price_old".into();
+        let id = format!("signet_{}", sku.id);
+        let line = |product, price| {
+            let l = super::preview_line(&sku, &product, &price);
+            l.split_whitespace().skip(1).collect::<Vec<_>>().join(" ")
+        };
+        assert_eq!(
+            line(ProductAction::Existing(id.clone()), PriceAction::Unchanged),
+            "ok price_old"
+        );
+        assert_eq!(
+            line(ProductAction::Create(id.clone()), PriceAction::Create),
+            format!("set new price on {id}, created")
+        );
+        assert_eq!(
+            line(
+                ProductAction::Reactivate(id.clone()),
+                PriceAction::Supersede {
+                    old: "price_old".into()
+                }
+            ),
+            format!("updated new price on {id}, reactivated (replaces price_old)")
+        );
+    }
+
     #[test]
     fn price_id_write_back_matches_the_example_catalog() {
         let src = include_str!("../../../catalog.example.toml");

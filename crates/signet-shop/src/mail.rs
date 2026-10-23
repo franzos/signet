@@ -352,21 +352,31 @@ impl MailService {
         session_id: &str,
         reason: &str,
     ) -> Result<Email> {
-        let body = match session_id.strip_prefix("charge:") {
-            Some(charge_id) => format!(
+        let body = if let Some(charge_id) = session_id.strip_prefix("charge:") {
+            format!(
                 "A refund or dispute could not be matched to a sale.\n\n\
                  Charge: {charge_id}\n\
                  Reason: {reason}\n\n\
                  Find the charge in Stripe, check for a license, and close the hold with \
-                 `signet-shop release charge:{charge_id}`.\n"
-            ),
-            None => format!(
+                 `signet-shop dismiss charge:{charge_id}`.\n"
+            )
+        } else if let Some(event_id) = session_id.strip_prefix("event:") {
+            format!(
+                "A signed webhook event could not be processed.\n\n\
+                 Event:  {event_id}\n\
+                 Reason: {reason}\n\n\
+                 Check the webhook endpoint's mode and API version against the shop's Stripe \
+                 key, run `signet-shop reconcile` for any sale it missed, and close the hold \
+                 with `signet-shop dismiss {session_id}`.\n"
+            )
+        } else {
+            format!(
                 "A paid checkout session was held and no license was issued.\n\n\
                  Session: {session_id}\n\
                  Reason:  {reason}\n\n\
                  The buyer sees a page saying the payment is being checked. Verify the \
                  payment in Stripe before releasing the session.\n"
-            ),
+            )
         };
         Email::builder(self.from.clone(), "Sale held for review", Body::Text(body))
             .to(operator.clone())
@@ -715,8 +725,26 @@ mod tests {
             panic!("expected plain text body");
         };
         assert!(text.contains("Charge: ch_123"), "{text}");
-        assert!(text.contains("release charge:ch_123"), "{text}");
+        assert!(text.contains("dismiss charge:ch_123"), "{text}");
         assert!(!text.contains("checkout session"), "{text}");
+    }
+
+    #[test]
+    fn event_hold_email_names_the_event() {
+        let svc = service();
+        let email = svc
+            .build_hold_email(
+                svc.operator_address().unwrap(),
+                "event:evt_123",
+                "event_rejected:checkout.session.completed:livemode mismatch",
+            )
+            .unwrap();
+        let Body::Text(text) = &email.body else {
+            panic!("expected plain text body");
+        };
+        assert!(text.contains("Event:  evt_123"), "{text}");
+        assert!(text.contains("dismiss event:evt_123"), "{text}");
+        assert!(!text.contains("checkout session was held"), "{text}");
     }
 
     #[test]

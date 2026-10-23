@@ -398,15 +398,15 @@ async fn success(
     }
     let ch = chrome(&state, &headers);
     match fulfill::fulfill(&state, &q.session_id).await {
-        Ok(fulfill::FulfillOutcome::Ready(lic)) => page(&SuccessTemplate {
+        Ok(Some(fulfill::FulfillOutcome::Ready { licence, .. })) => page(&SuccessTemplate {
             pending: false,
             held: false,
             session_id: q.session_id,
-            blob: lic.blob,
-            product: lic.product,
+            blob: licence.blob,
+            product: licence.product,
             chrome: ch,
         }),
-        Ok(fulfill::FulfillOutcome::Pending) => page(&SuccessTemplate {
+        Ok(Some(fulfill::FulfillOutcome::Pending)) => page(&SuccessTemplate {
             pending: true,
             held: false,
             session_id: q.session_id,
@@ -414,7 +414,7 @@ async fn success(
             product: String::new(),
             chrome: ch,
         }),
-        Ok(fulfill::FulfillOutcome::Held) => page(&SuccessTemplate {
+        Ok(Some(fulfill::FulfillOutcome::Held)) => page(&SuccessTemplate {
             pending: false,
             held: true,
             session_id: q.session_id,
@@ -422,7 +422,7 @@ async fn success(
             product: String::new(),
             chrome: ch,
         }),
-        Ok(fulfill::FulfillOutcome::LookupFailed) => (
+        Ok(None) => (
             StatusCode::NOT_FOUND,
             page(&ErrorTemplate {
                 title: "Checkout session not found",
@@ -450,9 +450,9 @@ async fn success_download(
         return (StatusCode::BAD_REQUEST, "invalid session id").into_response();
     }
     match fulfill::fulfill(&state, &q.session_id).await {
-        Ok(fulfill::FulfillOutcome::Ready(lic)) => {
+        Ok(Some(fulfill::FulfillOutcome::Ready { licence, .. })) => {
             // `product` is a validated slug, so it is safe to put in a header.
-            let disposition = format!("attachment; filename=\"{}-license.txt\"", lic.product);
+            let disposition = format!("attachment; filename=\"{}-license.txt\"", licence.product);
             let disposition = HeaderValue::from_str(&disposition).unwrap_or_else(|_| {
                 HeaderValue::from_static("attachment; filename=\"license.txt\"")
             });
@@ -464,16 +464,12 @@ async fn success_download(
                     ),
                     (header::CONTENT_DISPOSITION, disposition),
                 ],
-                lic.blob,
+                licence.blob,
             )
                 .into_response()
         }
         // Not paid yet, held or unknown: the status page explains each case.
-        Ok(
-            fulfill::FulfillOutcome::Pending
-            | fulfill::FulfillOutcome::Held
-            | fulfill::FulfillOutcome::LookupFailed,
-        ) => Redirect::to(&format!("/success?session_id={}", q.session_id)).into_response(),
+        Ok(Some(fulfill::FulfillOutcome::Pending | fulfill::FulfillOutcome::Held) | None) => Redirect::to(&format!("/success?session_id={}", q.session_id)).into_response(),
         Err(e) => {
             // Never log q.session_id: it is the bearer secret for this endpoint.
             tracing::error!("license download failed: {e:#}");
@@ -500,9 +496,21 @@ async fn webhook(State(state): State<AppState>, headers: HeaderMap, body: String
             tracing::warn!("webhook signature rejected");
             return (StatusCode::BAD_REQUEST, "bad signature").into_response();
         }
+        Err(e @ stripe_edge::Error::Permanent(_)) => {
+            let (id, kind) = stripe_edge::webhook::peek(&body).map_or_else(
+                || ("event:unknown".to_owned(), "unknown".to_owned()),
+                |h| (format!("event:{}", h.event_id), h.kind),
+            );
+            tracing::error!(%id, %kind, "webhook event not processed: {e}");
+            if let Err(e) = events::hold(&state, &id, &format!("event_rejected:{kind}:{e}")).await {
+                tracing::error!(%id, "webhook hold failed: {e:#}");
+                return (StatusCode::INTERNAL_SERVER_ERROR, "event error").into_response();
+            }
+            return StatusCode::OK.into_response();
+        }
         Err(e) => {
             tracing::error!("webhook event not processed: {e}");
-            return StatusCode::OK.into_response();
+            return (StatusCode::INTERNAL_SERVER_ERROR, "event error").into_response();
         }
     };
     let event_id = event.event_id().to_owned();
@@ -547,30 +555,10 @@ title = "Terms"
 "#;
 
     async fn state_from(toml: &str, content_dir: PathBuf) -> AppState {
-        let cfg = crate::config::AppConfig {
-            stripe_api_key: "sk_test_dummy".into(),
-            stripe_webhook_secret: "wh".into(),
-            database_url: "sqlite::memory:".into(),
-            keys_dir: "keys".into(),
-            content_dir,
-            base_url: "http://x".into(),
-            bind_addr: "127.0.0.1:0".into(),
-            trust_proxy: false,
-        };
-        let mut signing = std::collections::HashMap::new();
-        signing.insert(
-            "acme".to_string(),
-            ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]),
-        );
-        AppState {
-            cfg: std::sync::Arc::new(cfg),
-            catalog: std::sync::Arc::new(crate::catalog::parse(toml).unwrap()),
-            stripe: stripe_edge::Stripe::offline("signet", false),
-            signing: std::sync::Arc::new(signing),
-            db: crate::db::connect("sqlite::memory:").await.unwrap(),
-            mail: None,
-            lookups: crate::fulfill::tests::stub_lookups(),
-        }
+        let catalog = crate::catalog::parse(toml).unwrap();
+        let mut state = crate::fulfill::tests::state_with(catalog, content_dir).await;
+        state.lookups = crate::fulfill::tests::stub_lookups();
+        state
     }
 
     async fn test_state() -> AppState {
@@ -716,7 +704,11 @@ title = "Terms"
     }
 
     fn signed_webhook(payload: String) -> Request<Body> {
-        let sig = stripe_edge::test_util::sign(&payload, "wh", chrono::Utc::now().timestamp());
+        let sig = stripe_edge::test_util::sign(
+            &payload,
+            crate::fulfill::tests::WEBHOOK_SECRET,
+            chrono::Utc::now().timestamp(),
+        );
         Request::post("/webhook")
             .header("stripe-signature", sig)
             .body(Body::from(payload))
@@ -784,7 +776,10 @@ title = "Terms"
                     async move { crate::fulfill::fulfill_paid_session(&st, &session).await },
                 );
             assert_eq!(hook.await.unwrap().status(), StatusCode::OK);
-            let crate::fulfill::FulfillOutcome::Ready(direct) = page.await.unwrap().unwrap() else {
+            let crate::fulfill::FulfillOutcome::Ready {
+                licence: direct, ..
+            } = page.await.unwrap().unwrap()
+            else {
                 panic!("expected Ready");
             };
             let stored = crate::db::get_by_session(&state.db, &id)
@@ -824,24 +819,101 @@ title = "Terms"
         assert_eq!(hold.reason, "missing_sku");
         assert_eq!(outbox_kinds(&state).await, ["hold_notice"]);
 
-        // Signed but not a Stripe event.
-        let resp = send(state, signed_webhook("{}".into())).await;
-        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     #[tokio::test]
-    async fn webhook_other_mode_event_is_ignored_both_ways() {
+    async fn webhook_other_mode_event_is_held_both_ways() {
         for account_live in [false, true] {
-            let mut state = test_state().await;
+            let mut state = mailed(test_state().await);
             state.stripe = stripe_edge::Stripe::offline("signet", account_live);
             let mut session = crate::fulfill::tests::paid_session("cs_test_mode", "acme-annual");
             session.livemode = !account_live;
             let payload = stripe_edge::test_util::session_completed_json(&session);
-            let resp = send(state.clone(), signed_webhook(payload)).await;
-            assert_eq!(resp.status(), StatusCode::OK);
+            for _ in 0..2 {
+                let resp = send(state.clone(), signed_webhook(payload.clone())).await;
+                assert_eq!(resp.status(), StatusCode::OK);
+            }
             assert_eq!(count(&state, "licenses").await, 0);
-            assert_eq!(count(&state, "holds").await, 0);
+            assert_eq!(count(&state, "holds").await, 1);
+            let hold = crate::db::open_hold(&state.db, "event:evt_cs_test_mode")
+                .await
+                .unwrap()
+                .expect("hold");
+            assert!(
+                hold.reason
+                    .starts_with("event_rejected:checkout.session.completed:")
+                    && hold.reason.contains("livemode mismatch"),
+                "{}",
+                hold.reason
+            );
+            assert!(!hold.reason.contains("cs_test_mode"), "{}", hold.reason);
+            assert_eq!(outbox_kinds(&state).await, ["hold_notice"]);
         }
+    }
+
+    #[tokio::test]
+    async fn webhook_unparseable_event_is_held() {
+        let cases = [
+            (r#"{"id":"evt_bad","type":"checkout.session.completed"}"#, "event:evt_bad"),
+            ("{}", "event:unknown"),
+        ];
+        for (payload, id) in cases {
+            let state = test_state().await;
+            let resp = send(state.clone(), signed_webhook(payload.into())).await;
+            assert_eq!(resp.status(), StatusCode::OK, "{payload}");
+            let hold = crate::db::open_hold(&state.db, id)
+                .await
+                .unwrap()
+                .expect("hold");
+            assert!(
+                hold.reason.contains("unparseable webhook event"),
+                "{}",
+                hold.reason
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn webhook_hold_that_cannot_be_stored_is_retried() {
+        let mut state = test_state().await;
+        state.stripe = stripe_edge::Stripe::offline("signet", true);
+        state.db.close().await;
+        let session = crate::fulfill::tests::paid_session("cs_test_mode_db", "acme-annual");
+        let payload = stripe_edge::test_util::session_completed_json(&session);
+        let resp = send(state, signed_webhook(payload)).await;
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn revoked_licence_is_not_shown_or_downloaded() {
+        let state = test_state().await;
+        let session = crate::fulfill::tests::paid_session("cs_test_revoked", "acme-annual");
+        crate::fulfill::fulfill_paid_session(&state, &session)
+            .await
+            .unwrap();
+        crate::db::insert_hold(&state.db, &session.id, "refund:ch_rev", None)
+            .await
+            .unwrap();
+        let req = with_conn(
+            Request::get("/success?session_id=cs_test_revoked")
+                .body(Body::empty())
+                .unwrap(),
+        );
+        let body = body_string(send(state.clone(), req).await).await;
+        assert!(body.contains("being checked"), "{body}");
+        let stored = crate::db::get_by_session(&state.db, &session.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!body.contains(&stored.blob));
+
+        let req = with_conn(
+            Request::get("/success/download?session_id=cs_test_revoked")
+                .body(Body::empty())
+                .unwrap(),
+        );
+        let resp = send(state, req).await;
+        assert_eq!(resp.status(), StatusCode::SEE_OTHER);
     }
 
     #[tokio::test]

@@ -104,6 +104,10 @@ Once your SKUs have amounts and currencies, provision them in Stripe:
 
 This creates or updates the Stripe products and one-time prices for each SKU and writes the resolved `stripe_price_id` back into `catalog.toml` (preserving your comments). It's idempotent: unchanged SKUs are left alone, and a changed amount archives the old price and writes a new one.
 
+    signet-shop provision-stripe --dry-run
+
+Prints the same table without changing anything: per SKU, `ok` for a price that already matches, `set` for a new price, or `updated` for a new price that replaces the current one, with the product it would go on and whether that product would be created or reactivated. Only reads reach Stripe, and `catalog.toml` is not written.
+
 #### API key
 
 `STRIPE_API_KEY` takes a secret key (`sk_`) or a restricted key (`rk_`). A restricted key needs:
@@ -118,7 +122,7 @@ At startup the shop reads the account's balance once to learn whether the key be
 
 #### Webhook endpoint
 
-Create the endpoint in the Stripe Dashboard (Developers, Webhooks) or through the API, pointing at `BASE_URL/webhook`, with API version `2026-08-26.dahlia`. The shop's Stripe types are generated for that version and fail to parse events sent in a newer one, so the endpoint's version has to stay pinned even when the account's default version moves on. Subscribe it to:
+Create the endpoint through the API or the Stripe CLI, pointing at `BASE_URL/webhook`, with API version `2026-08-26.dahlia`. The Dashboard creates endpoints at the latest API version only, so it can't set this pin. The shop's Stripe types are generated for that version and fail to parse events sent in a newer one, so the endpoint's version has to stay pinned even when the account's default version moves on. Subscribe it to:
 
 - `checkout.session.completed`
 - `checkout.session.async_payment_succeeded`
@@ -140,17 +144,19 @@ Through the API, with a secret key:
       -d "enabled_events[]=charge.refunded" \
       -d "enabled_events[]=charge.dispute.created"
 
-The response's `secret` (`whsec_...`) is `STRIPE_WEBHOOK_SECRET`.
+The response's `secret` (`whsec_...`) is `STRIPE_WEBHOOK_SECRET`. The shop refuses to start when it is empty or doesn't start with `whsec_`.
+
+A signed event the shop can't process is answered 200, since Stripe would redeliver it for days and fail the same way, and held under `event:<event id>` (or `event:unknown` when the payload has no id) with reason `event_rejected:<event type>:<error>` and a hold notice. That covers an event whose live/test mode differs from the key's, which means the endpoint and `STRIPE_API_KEY` belong to different modes, and a payload that doesn't parse, usually an endpoint not pinned to the version above. Fix the endpoint, run `reconcile` for any sale it missed, then `dismiss` the hold.
 
 #### Fulfillment and holds
 
 On a completed checkout the shop mints the license with that category's web key and stores it, keyed on the Stripe session id. The webhook and the success page run the same fulfillment, so a license is issued once whichever arrives first.
 
-Before minting it checks the payment: the session's live/test mode must match the account, and the amount and currency must match the SKU. The webhook fulfils the session as read back from Stripe, not the event payload; a session Stripe doesn't return is held with reason `lookup_failed:session`. A paid session that fails a check, names an unknown SKU, has no signing key, or whose charge can't be read from Stripe (reason `lookup_failed`) is held instead: a row in the `holds` table, a notice to the operator address when mail is configured, and a "your payment is being checked" page for the buyer. A held session is never retried automatically; it waits for `release`.
+Before minting it checks the payment: the session's live/test mode must match the account, and the amount and currency must match the SKU. The webhook fulfils the session as read back from Stripe, not the event payload; a session Stripe doesn't return is held with reason `lookup_failed:session`. A paid session that fails a check, names an unknown SKU, has no signing key, or whose charge can't be read from Stripe (reason `lookup_failed`) is held instead: a row in the `holds` table, a notice to the operator address when mail is configured, and a "your payment is being checked" page for the buyer. A held session is never retried automatically; it waits for `release` or `dismiss`.
 
 Before minting the shop also reads the payment's latest charge. A refunded or disputed payment is held instead of minted, with reason `refund:<charge id>` or `dispute:charge:<charge id>` and no hold notice, and `release` refuses it.
 
-A full refund (`charge.refunded`) or a dispute (`charge.dispute.created`) marks the session's license revoked, recording the refund's charge id or the dispute id and the time. A partial refund keeps the license. The license blob verifies offline, so revocation is a record for you to act on, not a remote switch. A refund or dispute on a held session is written onto the hold, and `release` then refuses it. A refund or dispute whose charge Stripe refuses to look up is held under `charge:<charge id>` instead of a session id, with reason `lookup_failed:permanent`, and a hold notice goes to the operator. A refund or dispute of a charge with no Checkout Session is not a sale of this shop and is acknowledged without a hold.
+A full refund (`charge.refunded`) or a dispute (`charge.dispute.created`) marks the session's license revoked, recording the refund's charge id or the dispute id and the time. A partial refund keeps the license. The license blob verifies offline, so revocation is a record for you to act on, not a remote switch; the shop itself stops handing it out: the success page shows the "being checked" page instead, the download redirects there, and license mail or a sale notice not yet sent is dropped. A refund or dispute on a held session is written onto the hold, and `release` then refuses it. A refund or dispute whose charge Stripe refuses to look up is held under `charge:<charge id>` instead of a session id, with reason `lookup_failed:permanent`, and a hold notice goes to the operator. A refund or dispute of a charge with no Checkout Session is not a sale of this shop and is acknowledged without a hold.
 
 #### Mail outbox
 
@@ -158,23 +164,23 @@ License mail, operator sale notices and hold notices are written to the `mail_ou
 
 #### Operator commands
 
-These read the same environment as `serve`. `holds` reads the database only; `release` and `reconcile` also load the catalog and keys and connect to Stripe. None of them starts the web server or sends mail.
+These read the same environment as `serve`. `holds` and `dismiss` read the database only; `release` and `reconcile` also load the catalog and keys and connect to Stripe. None of them starts the web server or sends mail.
 
     signet-shop holds [--all]
 
-Lists open holds (with `--all`, resolved ones too) with their age, session id (or `charge:<charge id>`) and reason, the number of dead outbox rows, and every revoked license with its revocation time, session id and reason.
+Lists open holds (with `--all`, resolved ones too) with their age, session id (or `charge:<charge id>`, `event:<event id>`) and reason, the number of dead outbox rows, and every revoked license with its revocation time, session id and reason.
 
     signet-shop release <session_id>
 
 Issues the license for a held session after you have checked it. The session must have an open hold that carries no refund or dispute, must be paid according to Stripe, and its latest charge must be neither refunded nor disputed: a refunded or disputed charge is written onto the hold and the release fails. The amount, currency and mode checks are skipped; an unknown SKU or a missing signing key still fails. Minting, resolving the hold and queueing the mail happen in one transaction, and the buyer's success page shows the license from then on. Releasing the same session again fails, since its hold is resolved.
 
-    signet-shop release charge:<charge id>
+    signet-shop dismiss <id>
 
-Closes a `charge:` hold, which records a refund or dispute that could not be matched to a sale. It reads the database only, mints nothing and contacts no one. Before closing it, find the charge in Stripe and revoke any matching license by hand.
+Closes any open hold without issuing a license: a session you have refunded or decided not to fulfil, a `charge:` hold, or an `event:` hold. It mints nothing and contacts no one. A `charge:` hold records a refund or dispute that could not be matched to a sale, so before closing it find the charge in Stripe and revoke any matching license by hand. The hold stays in `holds --all` as resolved. If the same session fails again later for the same reason (the buyer reloads the success page, a webhook is redelivered, `reconcile` runs), it stays dismissed; a different failure reopens it with the new reason and a new hold notice, and one that now passes every check is fulfilled.
 
     signet-shop reconcile --since YYYY-MM-DD
 
-Lists the account's paid Checkout Sessions created since midnight UTC of that date and runs each through the webhook's fulfillment, then prints how many were fulfilled, already present, held, or failed. The list leaves out sessions tagged for another service. It prints no session ids, and exits non-zero when any session failed. Run it after webhook downtime; running it twice is harmless.
+Lists the account's paid Checkout Sessions created since midnight UTC of that date and runs each through the webhook's fulfillment, then prints how many were fulfilled, already present, held (a revoked license counts as held), or failed. The list leaves out sessions tagged for another service. It prints no session ids, and exits non-zero when any session failed. Run it after webhook downtime; running it twice is harmless.
 
 #### Sharing a Stripe account
 
@@ -186,7 +192,7 @@ Several apps can share one Stripe account. Each tags its Checkout Sessions with 
 
 #### Idempotency
 
-There is no `webhook_events` table. Every effect is idempotent on its own unique key: a license on its session id, a hold on its session id, and a revocation on the `revoked_at IS NULL` guard, which keeps the first reason. A replayed or duplicated event finds the effect already in place and changes nothing.
+There is no `webhook_events` table. Every effect is idempotent on its own unique key: a license on its session id, a hold on its session id (or `charge:`/`event:` id), and a revocation on the `revoked_at IS NULL` guard, which keeps the first reason. A replayed or duplicated event finds the effect already in place and changes nothing. A session that already has a license gets no hold: a refund or dispute revokes the license instead, and any other failure is skipped.
 
 ### Tax
 

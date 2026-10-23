@@ -100,7 +100,7 @@ Define categories and SKUs in `catalog.toml`, then:
 
     STRIPE_API_KEY=sk_... signet-shop provision-stripe
 
-It creates (or reuses) a Stripe Product + Price per SKU and writes each resolved `stripe_price_id` back into `catalog.toml` (comments preserved). It's idempotent; changing a SKU's `amount_cents` supersedes the price (archiving the old one) and rewrites the id on the next run.
+It creates (or reuses) a Stripe Product + Price per SKU and writes each resolved `stripe_price_id` back into `catalog.toml` (comments preserved). It's idempotent; changing a SKU's `amount_cents` supersedes the price (archiving the old one) and rewrites the id on the next run. `--dry-run` prints what each SKU would get using Stripe reads only, and writes nothing.
 
 ### Running
 
@@ -108,10 +108,11 @@ It creates (or reuses) a Stripe Product + Price per SKU and writes each resolved
 
 The buy flow: a Buy button POSTs to `/checkout`, which redirects to Stripe's hosted Checkout. Stripe collects the buyer's email and a required "Company name" custom field, both embedded in the issued license. After payment the buyer lands on `/success`, which queries Stripe directly and mints the license, so it works even without a webhook; a `/success/download` link serves the license as a file. The `/webhook` endpoint (verified with `STRIPE_WEBHOOK_SECRET`) is the fallback that fulfills when the buyer never returns, or for delayed payment methods. Fulfillment is idempotent, keyed on the Stripe session id, so a license mints exactly once. Issued licenses are recorded in SQLite for tracking and reissue. When email is configured, the buyer is emailed their license (with expiry) and the operator gets a sale notice, queued in the same transaction as the mint and sent by a background loop that retries with backoff; a mail failure never blocks or reverses license delivery.
 
-A paid session that fails a check (amount, currency or mode mismatch, unknown SKU, missing signing key, unreadable charge) is held instead of minted: the buyer sees that the payment is being checked, and the operator gets a hold notice. Before minting, the shop reads the payment's charge and holds a refunded or disputed payment instead (`refund:` or `dispute:charge:` reason), which `release` refuses. A full refund or a dispute marks the license revoked; one whose charge Stripe refuses to look up is held under `charge:<id>` with reason `lookup_failed:permanent` and a hold notice, closed with `release charge:<id>`. The default log filter is `info,stripe=error`, since async-stripe logs Checkout session ids at WARN. Three commands cover the operator side:
+A paid session that fails a check (amount, currency or mode mismatch, unknown SKU, missing signing key, unreadable charge) is held instead of minted: the buyer sees that the payment is being checked, and the operator gets a hold notice. Before minting, the shop reads the payment's charge and holds a refunded or disputed payment instead (`refund:` or `dispute:charge:` reason), which `release` refuses. A full refund or a dispute marks the license revoked, after which the success page and the download stop serving it and unsent mail for it is dropped; one whose charge Stripe refuses to look up is held under `charge:<id>` with reason `lookup_failed:permanent` and a hold notice. A signed webhook event the shop can't process (wrong live/test mode for the key, unparseable payload) is answered 200 and held under `event:<event id>`. The default log filter is `info,stripe=error`, since async-stripe logs Checkout session ids at WARN. Four commands cover the operator side:
 
     signet-shop holds [--all]                 # open holds, dead mail, revoked licenses
     signet-shop release <session_id>          # issue the license for a held, paid session
+    signet-shop dismiss <id>                  # close any open hold without issuing a license
     signet-shop reconcile --since YYYY-MM-DD  # fulfil paid sessions a missed webhook left behind
 
 See [docs/operator-guide.md](docs/operator-guide.md) for the webhook endpoint setup (pinned API version, events) and restricted-key permissions.

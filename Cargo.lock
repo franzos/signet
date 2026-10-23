@@ -3107,8 +3107,8 @@ dependencies = [
 
 [[package]]
 name = "stripe-edge"
-version = "0.1.0"
-source = "git+https://git.gofranz.com/franz/stripe-edge?tag=v0.1.0#7dfa7bbccdaa4521448c76c4af76c0daa4106a30"
+version = "0.1.2"
+source = "git+https://git.gofranz.com/franz/stripe-edge?tag=v0.1.2#60bf70c6a6b6d6600bb4402cd3d81360586dbdc9"
 dependencies = [
  "async-stripe",
  "async-stripe-billing",
@@ -3425,7 +3425,6 @@ dependencies = [
  "futures-util",
  "http",
  "http-body",
- "http-body-util",
  "pin-project-lite",
  "tower",
  "tower-layer",
