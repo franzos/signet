@@ -10,17 +10,21 @@ use crate::state::AppState;
 /// retrying cannot fix is logged and returns `Ok`.
 pub async fn handle(state: &AppState, event: Event) -> Result<()> {
     match event {
-        Event::SessionCompleted { event_id, session } => {
-            let session = match (state.lookups.session)(state, &session.id).await {
+        Event::SessionCompleted {
+            event_id,
+            session_id,
+            ..
+        } => {
+            let session = match (state.lookups.session)(state, &session_id).await {
                 Ok(Some(s)) => s,
                 Ok(None) => {
                     tracing::warn!(%event_id, "completed session not found in Stripe");
-                    hold(state, &session.id, "lookup_failed:session").await?;
+                    hold(state, &session_id, "lookup_failed:session").await?;
                     return Ok(());
                 }
                 Err(e) if !e.retryable() => {
                     tracing::error!(%event_id, "session lookup failed: {e}");
-                    hold(state, &session.id, "lookup_failed:session").await?;
+                    hold(state, &session_id, "lookup_failed:session").await?;
                     return Ok(());
                 }
                 Err(e) => return Err(e.into()),
