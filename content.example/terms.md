@@ -10,8 +10,9 @@ key issued to you is tied to your organization and must not be shared.
 
 ## 2. Payment
 
-Payments are processed by Stripe. Prices are shown at checkout in the listed
-currency and are inclusive or exclusive of tax as indicated there.
+Payments are processed by Stripe. Prices are shown in the listed currency and
+exclude VAT. Any VAT due is worked out at checkout from your billing address
+and added before you pay; a business with a valid EU VAT ID is reverse-charged.
 
 ## 3. Refunds
 

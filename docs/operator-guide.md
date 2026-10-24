@@ -198,13 +198,13 @@ There is no `webhook_events` table. Every effect is idempotent on its own unique
 
 Who works out VAT is a per-site choice, made in `[tax]`.
 
-**`mode = "none"`** (the default, and what you get by omitting the section) charges the catalog amount and says nothing about tax. That is the right setting if you sell in one country, price tax-inclusive, and split it in your own books.
+**`mode = "none"`** (the default, and what you get by omitting the section) charges the catalog amount and says nothing about tax. That is the right setting if you sell in one country and account for whatever VAT is due in your own books.
 
 **`mode = "stripe"`** turns on Stripe Tax. The checkout session then asks Stripe to compute the destination rate, requires a billing address (EU rules want two non-contradictory pieces of location evidence, and this is the one the buyer types), and collects a VAT ID — which is what turns an intra-EU B2B sale into a reverse charge, since Stripe validates the number against VIES before zero-rating it.
 
 Two things to get right before the first live sale:
 
-- **Run `provision-stripe` after switching the mode.** It marks prices tax-inclusive, which is what EU consumer law expects (the displayed price is the final price). A price's tax behaviour can't be changed once set, so existing prices are replaced and the old ones archived.
+- **Prices are net.** `provision-stripe` creates every price with `tax_behavior = exclusive` and every product with the Stripe Tax code for downloadable business software (`txcd_10202003`). The catalog amount is what a business pays; Stripe adds the buyer's VAT at checkout, or none when a validated EU VAT ID makes it a reverse charge, so the total of a reverse-charged sale equals the catalog amount and passes the payment cross-check. A price's tax behaviour can't be changed once set, so a price with another behaviour is replaced and the old one archived. Make sure the storefront and your terms say that prices exclude VAT.
 - **Register where you have an obligation.** Stripe Tax calculates and collects; it does not register you and, on the no-subscription tier, does not file. It charges 0.5% per taxed transaction with no monthly fee, and it monitors thresholds so you find out before you cross one.
 
 The seller fields are printed on the receipt:

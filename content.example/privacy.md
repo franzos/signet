@@ -9,6 +9,8 @@ purchase and issue your license, Stripe collects and shares with us:
 
 - your **email address**,
 - your **company name**,
+- your **billing address** and, for a business, your **VAT ID**, which Stripe
+  uses to work out the tax on your purchase,
 - your **payment details** (card or other payment method), handled entirely by
   Stripe; we never see or store card numbers.
 
@@ -19,5 +21,6 @@ attributed to you. It does not contain payment information.
 
 ## What we store
 
-We keep a record of issued licenses (company, email, product, and the Stripe
-session id) to support and reissue them. We do not sell your data.
+We keep a record of issued licenses (company, email, billing country, VAT ID,
+the amounts paid, product, and the Stripe session id) to support and reissue
+them and to account for tax. We do not sell your data.

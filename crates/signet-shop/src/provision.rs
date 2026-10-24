@@ -1,7 +1,10 @@
 use anyhow::{bail, Context, Result};
-use stripe_edge::{PriceAction, PriceChange, PriceSpec, ProductAction, Stripe};
+use stripe_edge::{PriceAction, PriceChange, PriceSpec, ProductAction, Stripe, TaxBehavior};
 
-use crate::catalog::{self, Sku, TaxMode};
+use crate::catalog::{self, Sku};
+
+/// Stripe Tax code: downloadable software, business use.
+const TAX_CODE: &str = "txcd_10202003";
 
 /// `signet-shop provision-stripe [--dry-run]`: reconcile every SKU in
 /// `catalog.toml` with Stripe. Each SKU gets a Product (`signet_<sku id>`, or the
@@ -32,11 +35,10 @@ pub async fn run(flag: Option<&str>) -> Result<()> {
     println!("{verb} {} SKU(s) against Stripe.\n", cat.skus.len());
     println!("{:<32} {:<8} price id", "sku", "status");
 
-    let tax_inclusive = cat.tax.mode == TaxMode::Stripe;
     if dry_run {
         for sku in &cat.skus {
             let (product, price) = stripe
-                .preview_price(&price_spec(sku, tax_inclusive))
+                .preview_price(&price_spec(sku))
                 .await
                 .with_context(|| format!("preview {}", sku.id))?;
             println!("{}", preview_line(sku, &product, &price));
@@ -50,7 +52,7 @@ pub async fn run(flag: Option<&str>) -> Result<()> {
     let mut changed = false;
     for sku in &cat.skus {
         let change = stripe
-            .ensure_price(price_spec(sku, tax_inclusive))
+            .ensure_price(price_spec(sku))
             .await
             .with_context(|| format!("reconcile {}", sku.id))?;
         let new = match change {
@@ -98,14 +100,16 @@ fn preview_line(sku: &Sku, product: &ProductAction, price: &PriceAction) -> Stri
     }
 }
 
-fn price_spec(sku: &Sku, tax_inclusive: bool) -> PriceSpec {
+/// The net one-time price for `sku`; Stripe Tax adds the buyer's rate on top in `stripe` mode.
+fn price_spec(sku: &Sku) -> PriceSpec {
     PriceSpec {
         product_key: sku.id.clone(),
         product_name: sku.display_name.clone(),
         product_adopt: None,
+        tax_code: Some(TAX_CODE.to_string()),
         unit_amount: sku.amount_cents,
         currency: sku.currency.clone(),
-        tax_inclusive,
+        tax_behavior: TaxBehavior::Exclusive,
         recurring: None,
         current: Some(sku.stripe_price_id.clone()).filter(|id| !id.is_empty()),
     }
@@ -168,14 +172,16 @@ mod tests {
     fn price_spec_adopts_the_catalog_price() {
         let cat = crate::catalog::parse(include_str!("../../../catalog.example.toml")).unwrap();
         let mut sku = cat.skus[0].clone();
-        let spec = super::price_spec(&sku, true);
+        let spec = super::price_spec(&sku);
         assert_eq!(spec.current, None);
         assert_eq!(spec.product_key, sku.id);
         assert_eq!(spec.currency, "eur");
-        assert!(spec.tax_inclusive && spec.recurring.is_none());
+        assert_eq!(spec.tax_behavior, stripe_edge::TaxBehavior::Exclusive);
+        assert_eq!(spec.tax_code.as_deref(), Some(super::TAX_CODE));
+        assert!(spec.recurring.is_none());
         sku.stripe_price_id = "price_live".into();
         assert_eq!(
-            super::price_spec(&sku, false).current.as_deref(),
+            super::price_spec(&sku).current.as_deref(),
             Some("price_live")
         );
     }

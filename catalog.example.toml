@@ -37,14 +37,15 @@ title = "Example Licenses"
 
 # VAT / sales tax. Omit this whole section for `mode = "none"`: the shop charges
 # the catalog amount and says nothing about tax, which is what a seller who
-# prices tax-inclusive and splits it in their own books wants.
+# accounts for VAT in their own books wants.
 #
 # `mode = "stripe"` turns on Stripe Tax: Stripe computes the destination rate,
 # collects the billing address it needs as location evidence, and validates a
 # buyer's VAT ID against VIES so an intra-EU B2B sale is reverse-charged. It
 # costs 0.5% per taxed transaction with no monthly fee, and it does NOT file
-# your returns. Run `provision-stripe` after switching: it replaces the prices
-# with tax-inclusive ones.
+# your returns. Prices are net in either mode: `provision-stripe` creates them
+# with `tax_behavior = exclusive`, so `amount_cents` is what a business pays
+# and VAT is added on top at checkout.
 #
 # The seller fields are printed on the purchase receipt emailed to the buyer.
 # That receipt is a payment record, NOT a fiscal invoice: Portugal (and others)
