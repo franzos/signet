@@ -17,7 +17,8 @@ pub async fn run(flag: Option<&str>) -> Result<()> {
             bail!("unknown argument {other}; usage: signet-shop provision-stripe [--dry-run]")
         }
     };
-    let api_key = std::env::var("STRIPE_API_KEY").context("set STRIPE_API_KEY to provision Stripe")?;
+    let api_key =
+        std::env::var("STRIPE_API_KEY").context("set STRIPE_API_KEY to provision Stripe")?;
     let stripe = Stripe::connect(&api_key, crate::STRIPE_SERVICE)
         .await
         .context("connect to Stripe")?;
@@ -40,7 +41,10 @@ pub async fn run(flag: Option<&str>) -> Result<()> {
                 .with_context(|| format!("preview {}", sku.id))?;
             println!("{}", preview_line(sku, &product, &price));
         }
-        println!("\nDry run: nothing written to Stripe or {}.", path.display());
+        println!(
+            "\nDry run: nothing written to Stripe or {}.",
+            path.display()
+        );
         return Ok(());
     }
     let mut changed = false;

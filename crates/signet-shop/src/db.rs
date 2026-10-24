@@ -517,7 +517,9 @@ mod tests {
     #[tokio::test]
     async fn closed_hold_reopens_on_a_new_failure() {
         let pool = connect("sqlite::memory:").await.unwrap();
-        insert_hold(&pool, "cs_o", "missing_sku", None).await.unwrap();
+        insert_hold(&pool, "cs_o", "missing_sku", None)
+            .await
+            .unwrap();
         assert!(resolve_hold(&pool, "cs_o").await.unwrap());
         sqlx::query("UPDATE holds SET created_at = 1000")
             .execute(&pool)

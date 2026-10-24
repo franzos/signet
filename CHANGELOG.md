@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.1.5] - 2026-10-24
+
+### Added
+- `signet-shop dismiss` closes any open hold without issuing a license
+- `signet-shop provision-stripe --dry-run` previews changes using Stripe reads only
+
+### Changed
+- Revoked licenses are no longer served on the success page or download
+- Unsent mail for a revoked license is dropped
+- `release` only accepts Checkout Session ids; other holds use `dismiss`
+- `stripe-edge` pinned to `v0.1.3`
+
+### Fixed
+- Signed webhook events the shop can't process are held instead of rejected
+- Session id is read from the slimmed `SessionCompleted` event
+
 ## [0.1.4] - 2026-10-22
 
 ### Added

@@ -420,7 +420,10 @@ term = "365d"
 
         let first = super::fulfill_paid_session(&state, &s).await.unwrap();
         let rec = match first {
-            FulfillOutcome::Ready { licence: r, inserted: true } => r,
+            FulfillOutcome::Ready {
+                licence: r,
+                inserted: true,
+            } => r,
             _ => panic!("expected a fresh Ready"),
         };
         // The company custom field is the license identity, not the billing name.
@@ -431,7 +434,10 @@ term = "365d"
         // Second call for the same session returns the identical stored blob.
         let second = super::fulfill_paid_session(&state, &s).await.unwrap();
         match second {
-            FulfillOutcome::Ready { licence: r, inserted: false } => assert_eq!(r.blob, blob),
+            FulfillOutcome::Ready {
+                licence: r,
+                inserted: false,
+            } => assert_eq!(r.blob, blob),
             _ => panic!("expected a stored Ready"),
         }
     }

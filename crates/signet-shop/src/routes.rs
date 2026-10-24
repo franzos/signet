@@ -469,7 +469,9 @@ async fn success_download(
                 .into_response()
         }
         // Not paid yet, held or unknown: the status page explains each case.
-        Ok(Some(fulfill::FulfillOutcome::Pending | fulfill::FulfillOutcome::Held) | None) => Redirect::to(&format!("/success?session_id={}", q.session_id)).into_response(),
+        Ok(Some(fulfill::FulfillOutcome::Pending | fulfill::FulfillOutcome::Held) | None) => {
+            Redirect::to(&format!("/success?session_id={}", q.session_id)).into_response()
+        }
         Err(e) => {
             // Never log q.session_id: it is the bearer secret for this endpoint.
             tracing::error!("license download failed: {e:#}");
@@ -818,7 +820,6 @@ title = "Terms"
             .expect("hold");
         assert_eq!(hold.reason, "missing_sku");
         assert_eq!(outbox_kinds(&state).await, ["hold_notice"]);
-
     }
 
     #[tokio::test]
@@ -854,7 +855,10 @@ title = "Terms"
     #[tokio::test]
     async fn webhook_unparseable_event_is_held() {
         let cases = [
-            (r#"{"id":"evt_bad","type":"checkout.session.completed"}"#, "event:evt_bad"),
+            (
+                r#"{"id":"evt_bad","type":"checkout.session.completed"}"#,
+                "event:evt_bad",
+            ),
             ("{}", "event:unknown"),
         ];
         for (payload, id) in cases {

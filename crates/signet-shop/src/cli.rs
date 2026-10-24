@@ -220,7 +220,9 @@ async fn reconcile_sessions(state: &AppState, sessions: &[SessionInfo]) -> Tally
     for s in sessions {
         match fulfill::fulfill_paid_session(state, s).await {
             Ok(FulfillOutcome::Ready { inserted: true, .. }) => t.fulfilled += 1,
-            Ok(FulfillOutcome::Ready { inserted: false, .. }) => t.present += 1,
+            Ok(FulfillOutcome::Ready {
+                inserted: false, ..
+            }) => t.present += 1,
             Ok(FulfillOutcome::Held) => t.held += 1,
             Ok(FulfillOutcome::Pending) => {
                 tracing::error!("reconcile: paid session not fulfilled");
@@ -399,12 +401,18 @@ mod tests {
             fulfill::fulfill_paid_session(&state, &s).await.unwrap(),
             FulfillOutcome::Held
         ));
-        assert!(db::open_hold(&state.db, "cs_dismiss").await.unwrap().is_none());
+        assert!(db::open_hold(&state.db, "cs_dismiss")
+            .await
+            .unwrap()
+            .is_none());
         assert_eq!(db::list_holds(&state.db, true).await.unwrap().len(), 1);
 
         s.amount_total = Some(2);
         fulfill::fulfill_paid_session(&state, &s).await.unwrap();
-        let hold = db::open_hold(&state.db, "cs_dismiss").await.unwrap().unwrap();
+        let hold = db::open_hold(&state.db, "cs_dismiss")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(hold.reason, "mismatch:amount 2 is below 49900");
         dismiss_hold(&state.db, "cs_dismiss").await.unwrap();
         assert_eq!(db::list_holds(&state.db, true).await.unwrap().len(), 1);
