@@ -2768,7 +2768,7 @@ dependencies = [
 
 [[package]]
 name = "signet-issuer"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -2784,7 +2784,7 @@ dependencies = [
 
 [[package]]
 name = "signet-shop"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "askama",
@@ -2812,7 +2812,7 @@ dependencies = [
 
 [[package]]
 name = "signetlib"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "base64",
  "ciborium",

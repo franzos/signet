@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.1.6] - 2026-10-24
+
+### Security
+- tokio 1.54.1, rustls-webpki 0.103.16 and ctutils 0.4.5 (RUSTSEC-2026-0381, -0385, -0386)
+
 ## [0.1.5] - 2026-10-24
 
 ### Added
