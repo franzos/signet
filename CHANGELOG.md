@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.1.7] - 2026-10-24
+
+### Changed
+- Prices are net in both tax modes; Stripe Tax adds VAT at checkout
+- Products carry the downloadable-software tax code
+
 ## [0.1.6] - 2026-10-24
 
 ### Security
