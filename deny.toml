@@ -12,4 +12,7 @@ ignore = [
     # the sqlite feature only. No private-key RSA decryption happens here, so the
     # key-recovery attack doesn't apply, and no fixed rsa release exists yet.
     "RUSTSEC-2023-0071",
+    # basic-toml (unmaintained) is only used by askama's derive macro to parse
+    # askama.toml at build time; no untrusted input reaches it.
+    "RUSTSEC-2026-0374",
 ]
